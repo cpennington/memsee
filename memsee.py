@@ -15,17 +15,31 @@ import time
 
 MAX_VALUE = 80
 
-def nice_num(n):
-    if n < 1e4:
-        return "%d" % n
-    elif n < 1e6:
-        return "%.1fK" % (n / 1e3)
-    elif n < 1e9:
-        return "%.1fM" % (n / 1e6)
-    elif n < 1e12:
-        return "%.1fG" % (n / 1e9)
-    else:
-        return "%.1fT" % (n / 1e12)
+class Num(object):
+    """A helper for .format formatting numbers."""
+    def __init__(self, n):
+        self.n = n
+
+    def __str__(self):
+        return str(self.n)
+
+    @property
+    def nice(self):
+        n = self.n
+        if n < 1e4:
+            return "%d" % n
+        elif n < 1e6:
+            return "%.1fK" % (n / 1e3)
+        elif n < 1e9:
+            return "%.1fM" % (n / 1e6)
+        elif n < 1e12:
+            return "%.1fG" % (n / 1e9)
+        else:
+            return "%.1fT" % (n / 1e12)
+
+    @property
+    def both(self):
+        return "{0} ({0.nice})".format(self)
 
 
 class MemSeeDb(object):
@@ -94,16 +108,31 @@ class MemSeeDb(object):
 
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
 
-    def execute(self, query, args):
+    def execute(self, query, args=()):
+        c = self.conn.cursor()
+        c.execute(query, args)
+        print c.rowcount
+        self.conn.commit()
+
+    def fetchall(self, query, args=()):
         c = self.conn.cursor()
         c.execute(query, args)
         for row in c.fetchall():
             yield row
 
-    def fetchone(self, query, args):
+    def fetchone(self, query, args=()):
         c = self.conn.cursor()
         c.execute(query, args)
         return c.fetchone()
+
+    def num_objects(self):
+        return int(self.fetchone("select count(*) from object;")[0])
+
+    def num_refs(self):
+        return int(self.fetchone("select count(*) from ref;")[0])
+
+    def total_bytes(self):
+        return int(self.fetchone("select sum(size) from object;")[0])
 
 
 class MemSeeApp(cmd.Cmd):
@@ -168,12 +197,23 @@ class MemSeeApp(cmd.Cmd):
         start = time.time()
         with opener(filename) as data:
             stats = self.db.import_data(data, sys.stdout)
+
+        print "Marking top objects"
+        self.db.execute("insert into ref (parent, child) select 0, address from object where address not in (select child from ref);")
+
         end = time.time()
-        print "{} objects and {} references totalling {} bytes ({:.1f}s)".format(
-            nice_num(stats['objs']),
-            nice_num(stats['refs']),
-            nice_num(stats['bytes']),
+        print "{0.both} objects and {1.both} references totalling {2.both} bytes ({:.1f}s)".format(
+            Num(stats['objs']),
+            Num(stats['refs']),
+            Num(stats['bytes']),
             end - start,
+        )
+
+    def do_stats(self, line):
+        print "{.both} objects, {.both} references, {.both} total bytes".format(
+            Num(self.db.num_objects()),
+            Num(self.db.num_refs()),
+            Num(self.db.total_bytes()),
         )
 
     def do_parents(self, line):
@@ -188,7 +228,7 @@ class MemSeeApp(cmd.Cmd):
 
         address = int(line)
         query = "select address, type, name, value, size, len from object, ref where object.address = ref.parent and ref.child = ?"
-        for row in self.db.execute(query, (address,)):
+        for row in self.db.fetchall(query, (address,)):
             print row
 
     def do_info(self, line):
@@ -204,6 +244,28 @@ class MemSeeApp(cmd.Cmd):
         address = int(line)
         query = "select * from object, ref where object.address = ?"
         print self.db.fetchone(query, (address,))
+
+    def do_gc(self, line):
+        """Delete orphan objects and their references, recursively."""
+        num_objects = self.db.num_objects()
+        num_refs = self.db.num_refs()
+
+        while True:
+            self.db.execute("delete from ref where parent != 0 and parent not in (select address from object)")
+            new_num_refs = self.db.num_refs()
+            print "Deleted {} references, total is {}".format((num_refs - new_num_refs), new_num_refs)
+            if new_num_refs == num_refs:
+                print "Done."
+                break
+            num_refs = new_num_refs
+
+            self.db.execute("delete from object where address not in (select child from ref)")
+            new_num_objects = self.db.num_objects()
+            print "Deleted {} objects, total is {}".format((num_objects - new_num_objects), new_num_objects)
+            if new_num_objects == num_objects:
+                print "Done."
+                break
+            num_objects = new_num_objects
 
 
 if __name__ == "__main__":
