@@ -9,6 +9,9 @@ import sqlite3
 import sys
 import time
 
+from tabulate import tabulate
+
+
 # Data is like:
 #
 # {"address": 125817416, "type": "list", "size": 72, "len": 0, "refs": []}
@@ -109,14 +112,17 @@ class MemSeeDb(object):
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
 
     def execute(self, query, args=()):
+        """For running SQL that makes changes, and doesn't expect results."""
         c = self.conn.cursor()
         c.execute(query, args)
-        print c.rowcount
         self.conn.commit()
+        return c.rowcount
 
-    def fetchall(self, query, args=()):
+    def fetchall(self, query, args=(), header=False):
         c = self.conn.cursor()
         c.execute(query, args)
+        if header:
+            yield [d[0] for d in c.description]
         for row in c.fetchall():
             yield row
 
@@ -133,6 +139,23 @@ class MemSeeDb(object):
 
     def total_bytes(self):
         return int(self.fetchone("select sum(size) from object;")[0])
+
+
+def need_db(fn):
+    def _dec(self, *args, **kwargs):
+        if not self.db:
+            print "Need an open database"
+            return
+        return fn(self, *args, **kwargs)
+    return _dec
+
+def handle_sql_error(fn):
+    def _dec(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except sqlite3.Error as e:
+            print "*** SQL error: {}".format(e)
+    return _dec
 
 
 class MemSeeApp(cmd.Cmd):
@@ -176,11 +199,9 @@ class MemSeeApp(cmd.Cmd):
         dbfile = os.path.expanduser(words[0])
         self.db = MemSeeDb(dbfile)
 
+    @need_db
     def do_read(self, line):
         """Read a data file: read DATAFILE"""
-        if not self.db:
-            print "Can't read a file until you open a database."
-            return
         if not line:
             print "Need a file to read"
             return
@@ -198,17 +219,20 @@ class MemSeeApp(cmd.Cmd):
         with opener(filename) as data:
             stats = self.db.import_data(data, sys.stdout)
 
-        print "Marking top objects"
-        self.db.execute("insert into ref (parent, child) select 0, address from object where address not in (select child from ref);")
+        sys.stdout.write("Marking top objects...")
+        sys.stdout.flush()
+        n = self.db.execute("insert into ref (parent, child) select 0, address from object where address not in (select child from ref);")
+        print " {}".format(n)
 
         end = time.time()
-        print "{0.both} objects and {1.both} references totalling {2.both} bytes ({:.1f}s)".format(
+        print "{.both} objects and {.both} references totalling {.both} bytes ({:.1f}s)".format(
             Num(stats['objs']),
             Num(stats['refs']),
             Num(stats['bytes']),
             end - start,
         )
 
+    @need_db
     def do_stats(self, line):
         print "{.both} objects, {.both} references, {.both} total bytes".format(
             Num(self.db.num_objects()),
@@ -216,14 +240,11 @@ class MemSeeApp(cmd.Cmd):
             Num(self.db.total_bytes()),
         )
 
+    @need_db
     def do_parents(self, line):
         """Show parent objects: parents ADDRESS"""
         if not line or not line.isdigit():
             print "Need an address to check for: parents ADDRESS"
-            return
-
-        if not self.db:
-            print "Database must be open: open DBFILE"
             return
 
         address = int(line)
@@ -231,20 +252,43 @@ class MemSeeApp(cmd.Cmd):
         for row in self.db.fetchall(query, (address,)):
             print row
 
+    @need_db
     def do_info(self, line):
         """Show info about an object: info ADDRESS"""
         if not line or not line.isdigit():
             print "Need an address to check for: info ADDRESS"
             return
 
-        if not self.db:
-            print "Database must be open: open DBFILE"
-            return
-
         address = int(line)
         query = "select * from object, ref where object.address = ?"
         print self.db.fetchone(query, (address,))
 
+    def fix_cell(self, c):
+        if isinstance(c, (int, long)):
+            return str(c)
+        return c
+
+    def process_row(self, data):
+        for row in data:
+            newrow = [self.fix_cell(c) for c in row]
+            yield newrow
+
+    @need_db
+    @handle_sql_error
+    def do_select(self, line):
+        query = "select " + line
+        results = self.db.fetchall(query, header=True)
+        names = list(next(results))
+        print tabulate(self.process_row(results), headers=names)
+
+    @need_db
+    @handle_sql_error
+    def do_delete(self, line):
+        query = "delete " + line
+        nrows = self.db.execute(query)
+        print "{} rows deleted".format(nrows)
+
+    @need_db
     def do_gc(self, line):
         """Delete orphan objects and their references, recursively."""
         num_objects = self.db.num_objects()
