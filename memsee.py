@@ -40,7 +40,10 @@ class Num(object):
 
     @property
     def both(self):
-        return "{0} ({0.nice})".format(self)
+        if self.n >= 10000:
+            return "{0} ({0.nice})".format(self)
+        else:
+            return "{0}".format(self)
 
 
 class MemSeeDb(object):
