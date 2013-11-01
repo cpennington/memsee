@@ -97,14 +97,12 @@ class MemSeeDb(object):
     def execute(self, query, args):
         c = self.conn.cursor()
         c.execute(query, args)
-        print c.description
         for row in c.fetchall():
             yield row
 
     def fetchone(self, query, args):
         c = self.conn.cursor()
         c.execute(query, args)
-        print c.description
         return c.fetchone()
 
 
