@@ -9,16 +9,7 @@ import time
 #
 # {"address": 125817416, "type": "list", "size": 72, "len": 0, "refs": []}
 
-SCHEMA = [
-    "create table object (address int primary key, type text, name text, value text, size int, len int);",
-    "create index size on object (size);",
-    "create index type on object (type);",
-    "create index name on object (name);",
-    "create index value on object (value);",
-    "create table ref (parent int, child int);",
-    "create index parent on ref (parent);",
-    "create index child on ref (child);",
-]
+MAX_VALUE = 80
 
 def nice_num(n):
     if n < 1e4:
@@ -33,13 +24,75 @@ def nice_num(n):
         return "%.1fT" % (n / 1e12)
 
 
+class MemSeeDb(object):
+    SCHEMA = [
+        "create table object (address int primary key, type text, name text, value text, size int, len int);",
+        "create index size on object (size);",
+        "create index type on object (type);",
+        "create index name on object (name);",
+        "create index value on object (value);",
+
+        "create table ref (parent int, child int);",
+        "create index parent on ref (parent);",
+        "create index child on ref (child);",
+    ]
+
+    def __init__(self, filename):
+        self.filename = filename
+        self.conn = sqlite3.connect(filename)
+
+    def create_schema(self):
+        c = self.conn.cursor()
+        for stmt in self.SCHEMA:
+            c.execute(stmt)
+        self.conn.commit()
+
+    def import_data(self, data, out=None):
+        if out:
+            out.write("Reading")
+            out.flush()
+
+        objs = refs = bytes = 0
+        c = self.conn.cursor()
+        for line in data:
+            objdata = json.loads(line)
+            c.execute(
+                "insert into object (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)", (
+                    objdata['address'],
+                    objdata['type'],
+                    objdata.get('name'),
+                    objdata.get('value'),
+                    objdata['size'],
+                    objdata.get('len', 0),
+                )
+            )
+            objs += 1
+            bytes += objdata['size']
+            for ref in objdata['refs']:
+                c.execute(
+                    "insert into ref (parent, child) values (?, ?)",
+                    (objdata['address'], ref)
+                )
+                refs += 1
+            if objs % 10000 == 0:
+                self.conn.commit()
+                if out:
+                    out.write(".")
+                    out.flush()
+
+        self.conn.commit()
+        if out:
+            out.write("\n")
+
+        return {'objs': objs, 'refs': refs, 'bytes': bytes}
+
+
 class MemSeeApp(cmd.Cmd):
 
     prompt = "::> "
 
     def __init__(self):
-        cmd.Cmd.__init__(self)
-        self.dbfile = None
+        cmd.Cmd.__init__(self)  # cmd.Cmd isn't an object()!
         self.db = None
 
     def emptyline(self):
@@ -60,12 +113,9 @@ class MemSeeApp(cmd.Cmd):
         words = line.split()
         if len(words) > 1:
             self.default(line)
-        self.dbfile = words[0]
-        self.db = sqlite3.connect(self.dbfile)
-        c = self.db.cursor()
-        for stmt in SCHEMA:
-            c.execute(stmt)
-        self.db.commit()
+        dbfile = words[0]
+        self.db = MemSeeDb(dbfile)
+        self.db.create_schema()
 
     def do_open(self, line):
         """Open a database: open DBFILE"""
@@ -75,8 +125,8 @@ class MemSeeApp(cmd.Cmd):
         words = line.split()
         if len(words) > 1:
             self.default(line)
-        self.dbfile = words[0]
-        self.db = sqlite3.connect(self.dbfile)
+        dbfile = words[0]
+        self.db = MemSeeDb(dbfile)
 
     def do_read(self, line):
         """Read a data file: read DATAFILE"""
@@ -96,34 +146,15 @@ class MemSeeApp(cmd.Cmd):
         else:
             opener = open
 
-        objs = refs = bytes = 0
         start = time.time()
-        sys.stdout.write("Reading")
-        sys.stdout.flush()
-        c = self.db.cursor()
         with opener(filename) as data:
-            for line in data:
-                objdata = json.loads(line)
-                c.execute(
-                    "insert into object (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)",
-                    (objdata['address'], objdata['type'], objdata.get('name'), objdata.get('value'), objdata['size'], objdata.get('len', 0))
-                )
-                objs += 1
-                bytes += objdata['size']
-                for ref in objdata['refs']:
-                    c.execute(
-                        "insert into ref (parent, child) values (?, ?)",
-                        (objdata['address'], ref)
-                    )
-                    refs += 1
-                if objs % 10000 == 0:
-                    self.db.commit()
-                    sys.stdout.write(".")
-                    sys.stdout.flush()
-        self.db.commit()
+            stats = self.db.import_data(data, sys.stdout)
         end = time.time()
-        print "\n%s objects and %s references totalling %s bytes read in %.1fs" % (
-            nice_num(objs), nice_num(refs), nice_num(bytes), (end-start),
+        print "{} objects and {} references totalling {} bytes ({.1f}s)".format(
+            nice_num(stats['objs']),
+            nice_num(stats['refs']),
+            nice_num(stats['bytes']),
+            end - start,
         )
 
 
