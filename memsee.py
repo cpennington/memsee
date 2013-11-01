@@ -200,4 +200,6 @@ class MemSeeApp(cmd.Cmd):
 
 if __name__ == "__main__":
     app = MemSeeApp()
+    if len(sys.argv) > 1:
+        app.do_open(sys.argv[1])
     app.cmdloop()
