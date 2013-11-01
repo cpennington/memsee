@@ -169,7 +169,7 @@ class MemSeeApp(cmd.Cmd):
         with opener(filename) as data:
             stats = self.db.import_data(data, sys.stdout)
         end = time.time()
-        print "{} objects and {} references totalling {} bytes ({.1f}s)".format(
+        print "{} objects and {} references totalling {} bytes ({:.1f}s)".format(
             nice_num(stats['objs']),
             nice_num(stats['refs']),
             nice_num(stats['bytes']),
