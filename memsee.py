@@ -86,6 +86,17 @@ class MemSeeDb(object):
 
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
 
+    def execute(self, query, args):
+        c = self.conn.cursor()
+        c.execute(query, args)
+        for row in c.fetchall():
+            yield row
+
+    def fetchone(self, query, args):
+        c = self.conn.cursor()
+        c.execute(query, args)
+        return c.fetchone()
+
 
 class MemSeeApp(cmd.Cmd):
 
@@ -156,6 +167,35 @@ class MemSeeApp(cmd.Cmd):
             nice_num(stats['bytes']),
             end - start,
         )
+
+    def do_parents(self, line):
+        """Show parent objects: parents ADDRESS"""
+        if not line or not line.isdigit():
+            print "Need an address to check for: parents ADDRESS"
+            return
+
+        if not self.db:
+            print "Database must be open: open DBFILE"
+            return
+
+        address = int(line)
+        query = "select address, type, name, value, size, len from object, ref where object.address = ref.parent and ref.child = ?"
+        for row in self.db.execute(query, (address,)):
+            print row
+
+    def do_info(self, line):
+        """Show info about an object: info ADDRESS"""
+        if not line or not line.isdigit():
+            print "Need an address to check for: info ADDRESS"
+            return
+
+        if not self.db:
+            print "Database must be open: open DBFILE"
+            return
+
+        address = int(line)
+        query = "select * from object, ref where object.address = ?"
+        print self.db.fetchone(query, (address,))
 
 
 if __name__ == "__main__":
