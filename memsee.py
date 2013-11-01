@@ -1,6 +1,10 @@
+#!/usr/bin/env python
+
 import cmd
 import gzip
 import json
+import os
+import re
 import sqlite3
 import sys
 import time
@@ -55,7 +59,11 @@ class MemSeeDb(object):
         objs = refs = bytes = 0
         c = self.conn.cursor()
         for line in data:
-            objdata = json.loads(line)
+            try:
+                objdata = json.loads(line)
+            except ValueError:
+                # https://bugs.launchpad.net/meliae/+bug/876810
+                objdata = json.loads(re.sub(r'"value": "(\\"|[^"])*"', '"value": "SURROGATE ERROR REMOVED"', line))
             c.execute(
                 "insert into object (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)", (
                     objdata['address'],
@@ -89,12 +97,14 @@ class MemSeeDb(object):
     def execute(self, query, args):
         c = self.conn.cursor()
         c.execute(query, args)
+        print c.description
         for row in c.fetchall():
             yield row
 
     def fetchone(self, query, args):
         c = self.conn.cursor()
         c.execute(query, args)
+        print c.description
         return c.fetchone()
 
 
@@ -136,7 +146,7 @@ class MemSeeApp(cmd.Cmd):
         words = line.split()
         if len(words) > 1:
             self.default(line)
-        dbfile = words[0]
+        dbfile = os.path.expanduser(words[0])
         self.db = MemSeeDb(dbfile)
 
     def do_read(self, line):
