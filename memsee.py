@@ -16,8 +16,6 @@ from tabulate import tabulate
 #
 # {"address": 125817416, "type": "list", "size": 72, "len": 0, "refs": []}
 
-MAX_VALUE = 80
-
 class Num(object):
     """A helper for .format formatting numbers."""
     def __init__(self, n):
@@ -46,17 +44,24 @@ class Num(object):
 
 
 class MemSeeDb(object):
+    # Fixed schema for the database.
     SCHEMA = [
-        "create table object (address int primary key, type text, name text, value text, size int, len int);",
-        "create index size on object (size);",
-        "create index type on object (type);",
-        "create index name on object (name);",
-        "create index value on object (value);",
+        "create table gen (num int, current int);",
+    ]
+
+    # Schema for each generation, each is its own set of tables and indexes.
+    GEN_SCHEMA = [
+        "create table obj (address int primary key, type text, name text, value text, size int, len int);",
+        "create index size{gen} on obj (size);",
+        "create index type{gen} on obj (type);",
+        "create index name{gen} on obj (name);",
+        "create index value{gen} on obj (value);",
 
         "create table ref (parent int, child int);",
-        "create index parent on ref (parent);",
-        "create index child on ref (child);",
+        "create index parent{gen} on ref (parent);",
+        "create index child{gen} on ref (child);",
     ]
+    GEN_TABLES = ['obj', 'ref']
 
     def __init__(self, filename):
         self.filename = filename
@@ -68,7 +73,35 @@ class MemSeeDb(object):
             c.execute(stmt)
         self.conn.commit()
 
+    def switch_to_generation(self, newgen):
+        oldgen = self.fetchint("select num from gen where current = 1")
+        if oldgen is not None:
+            for table in self.GEN_TABLES:
+                self.execute("alter table {table} rename to {table}{gen}".format(table=table, gen=oldgen))
+        self.execute("update gen set current=0")
+        if newgen:
+            for table in self.GEN_TABLES:
+                self.execute("alter table {table}{gen} rename to {table}".format(table=table, gen=newgen))
+            self.execute("update gen set current=1 where num=?", (newgen,))
+
+    def make_new_generation(self):
+        gen = self.fetchint("select max(num) from gen", default=0)
+        gen += 1
+        self.execute(
+            "insert into gen (num, current) values (?, 1)",
+            (gen,)
+        )
+        for stmt in self.GEN_SCHEMA:
+            self.execute(stmt.format(gen=gen))
+
     def import_data(self, data, out=None):
+        # Put away the current generation tables.
+        self.switch_to_generation(None)
+
+        # Make a new current generation.
+        self.make_new_generation()
+
+        # Read the data.
         if out:
             out.write("Reading")
             out.flush()
@@ -82,7 +115,7 @@ class MemSeeDb(object):
                 # https://bugs.launchpad.net/meliae/+bug/876810
                 objdata = json.loads(re.sub(r'"value": "(\\"|[^"])*"', '"value": "SURROGATE ERROR REMOVED"', line))
             c.execute(
-                "insert into object (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)", (
+                "insert into obj (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)", (
                     objdata['address'],
                     objdata['type'],
                     objdata.get('name'),
@@ -131,14 +164,22 @@ class MemSeeDb(object):
         c.execute(query, args)
         return c.fetchone()
 
+    def fetchint(self, query, args=(), default=None):
+        one = self.fetchone(query, args)
+        if one is None:
+            return default
+        if one[0] is None:
+            return default
+        return int(one[0])
+
     def num_objects(self):
-        return int(self.fetchone("select count(*) from object;")[0])
+        return self.fetchint("select count(*) from obj")
 
     def num_refs(self):
-        return int(self.fetchone("select count(*) from ref;")[0])
+        return self.fetchint("select count(*) from ref")
 
     def total_bytes(self):
-        return int(self.fetchone("select sum(size) from object;")[0])
+        return self.fetchint("select sum(size) from obj")
 
 
 def need_db(fn):
@@ -221,7 +262,7 @@ class MemSeeApp(cmd.Cmd):
 
         sys.stdout.write("Marking top objects...")
         sys.stdout.flush()
-        n = self.db.execute("insert into ref (parent, child) select 0, address from object where address not in (select child from ref);")
+        n = self.db.execute("insert into ref (parent, child) select 0, address from obj where address not in (select child from ref);")
         print " {}".format(n)
 
         end = time.time()
@@ -248,7 +289,7 @@ class MemSeeApp(cmd.Cmd):
             return
 
         address = int(line)
-        query = "select address, type, name, value, size, len from object, ref where object.address = ref.parent and ref.child = ?"
+        query = "select address, type, name, value, size, len from obj, ref where obj.address = ref.parent and ref.child = ?"
         for row in self.db.fetchall(query, (address,)):
             print row
 
@@ -260,7 +301,7 @@ class MemSeeApp(cmd.Cmd):
             return
 
         address = int(line)
-        query = "select * from object, ref where object.address = ?"
+        query = "select * from obj, ref where obj.address = ?"
         print self.db.fetchone(query, (address,))
 
     def fix_cell(self, c):
@@ -295,7 +336,7 @@ class MemSeeApp(cmd.Cmd):
         num_refs = self.db.num_refs()
 
         while True:
-            self.db.execute("delete from ref where parent != 0 and parent not in (select address from object)")
+            self.db.execute("delete from ref where parent != 0 and parent not in (select address from obj)")
             new_num_refs = self.db.num_refs()
             print "Deleted {} references, total is {}".format((num_refs - new_num_refs), new_num_refs)
             if new_num_refs == num_refs:
@@ -303,13 +344,38 @@ class MemSeeApp(cmd.Cmd):
                 break
             num_refs = new_num_refs
 
-            self.db.execute("delete from object where address not in (select child from ref)")
+            self.db.execute("delete from obj where address not in (select child from ref)")
             new_num_objects = self.db.num_objects()
             print "Deleted {} objects, total is {}".format((num_objects - new_num_objects), new_num_objects)
             if new_num_objects == num_objects:
                 print "Done."
                 break
             num_objects = new_num_objects
+
+    @need_db
+    def do_gen(self, line):
+        """Examine or switch generations."""
+        words = line.split()
+        gens = self.db.fetchint("select count(*) from gen")
+        if not words:
+            gen = self.db.fetchint("select num from gen where current=1")
+            print "{} generations, current is {}".format(gens, gen or "-none-")
+        else:
+            if words[0] == "none":
+                gen = None
+                msg = "Using no generation, of {gens}"
+            else:
+                try:
+                    gen = int(words[0])
+                except ValueError:
+                    print "** Didn't understand {!r} as a generation".format(words[0])
+                    return
+                if not (0 < gen <= gens):
+                    print "** Not a valid generation number: {}".format(gen)
+                    return
+                msg = "Using generation {gen} of {gens}"
+            self.db.switch_to_generation(gen)
+            print msg.format(gen=gen, gens=gens)
 
 
 if __name__ == "__main__":
