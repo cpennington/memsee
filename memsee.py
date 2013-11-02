@@ -186,6 +186,7 @@ class MemSeeDb(object):
 
 
 def need_db(fn):
+    """Decorator for command handlers that need an open database."""
     def _dec(self, *args, **kwargs):
         if not self.db:
             print "Need an open database"
@@ -194,11 +195,14 @@ def need_db(fn):
     return _dec
 
 def handle_sql_error(fn):
+    """Decorator for command handlers that accept user SQL, to handle errors."""
     def _dec(self, *args, **kwargs):
         try:
             return fn(self, *args, **kwargs)
         except sqlite3.Error as e:
             print "*** SQL error: {}".format(e)
+        except MemSeeException as e:
+            print "*** {}".format(e)
     return _dec
 
 
@@ -209,6 +213,7 @@ class MemSeeApp(cmd.Cmd):
     def __init__(self):
         cmd.Cmd.__init__(self)  # cmd.Cmd isn't an object()!
         self.db = None
+        self.results = []
 
     def emptyline(self):
         pass
@@ -307,28 +312,73 @@ class MemSeeApp(cmd.Cmd):
         query = "select * from obj, ref where obj.address = ?"
         print self.db.fetchone(query, (address,))
 
+    def replace_result(self, m):
+        """re.sub function for #\d.\d in SQL."""
+        res = int(m.group(1))
+        row = int(m.group(2))
+        try:
+            return str(self.results[res][row])
+        except IndexError:
+            raise SubstitutionError("Result reference out of range: {}".format(m.group()))
+
+    def substitute_sql(self, sql):
+        """Replace tokens in `sql`."""
+        # replace #num.num with ids lifted from results.
+        sql = re.sub(r"#(\d+)\.(\d+)", self.replace_result, sql)
+        return sql
+
     def fix_cell(self, c):
+        """Fix cell data for good presentation."""
         if isinstance(c, (int, long)):
+            # tabulate gets long ints wrong, make them strings.
             return str(c)
+        if isinstance(c, (str, unicode)):
+            # Scrub things that will mess with the output.
+            return c.replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
         return c
 
-    def process_row(self, data):
-        for row in data:
-            newrow = [self.fix_cell(c) for c in row]
-            yield newrow
+    def process_row(self, data, names):
+        """Process a row for output."""
+        ids = 'address' in names
+        if ids:
+            # These results have object addresses, save them away.
+            row_ids = []
+            res_num = len(self.results)
+            self.results.append(row_ids)
+            address_idx = names.index('address')
+
+        for i, row in enumerate(data):
+            new_row = [self.fix_cell(c) for c in row]
+            if ids:
+                # Since we have ids, show what number they're saved as.
+                row_id = "#{}.{}".format(res_num, i)
+                row_ids.append(row[address_idx])
+                yield [row_id] + new_row
+            else:
+                yield new_row
 
     @need_db
     @handle_sql_error
     def do_select(self, line):
-        query = "select " + line
+        """Perform a query against the SQLite db."""
+        query = self.substitute_sql("select " + line)
         results = self.db.fetchall(query, header=True)
         names = list(next(results))
-        print tabulate(self.process_row(results), headers=names)
+        if 'address' in names:
+            headers = [''] + names
+        else:
+            headers = names
+
+        print tabulate(
+            self.process_row(results, names),
+            headers=headers,
+        )
 
     @need_db
     @handle_sql_error
     def do_delete(self, line):
-        query = "delete " + line
+        """Execute a delete statement against the SQLite db."""
+        query = self.substitute_sql("delete " + line)
         nrows = self.db.execute(query)
         print "{} rows deleted".format(nrows)
 
@@ -379,6 +429,13 @@ class MemSeeApp(cmd.Cmd):
                 msg = "Using generation {gen} of {gens}"
             self.db.switch_to_generation(gen)
             print msg.format(gen=gen, gens=gens)
+
+
+class MemSeeException(Exception):
+    pass
+
+class SubstitutionError(MemSeeException):
+    pass
 
 
 if __name__ == "__main__":
