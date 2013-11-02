@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import cmd
+import functools
 import gzip
 import json
 import os
@@ -50,6 +51,7 @@ class MemSeeDb(object):
     # Fixed schema for the database.
     SCHEMA = [
         "create table gen (num int, current int);",
+        "create table env (name text, value text);",
     ]
 
     # Schema for each generation, each is its own set of tables and indexes.
@@ -184,9 +186,16 @@ class MemSeeDb(object):
     def total_bytes(self):
         return self.fetchint("select sum(size) from obj")
 
+    def define_name(self, name, value):
+        self.execute("insert into env (name, value) values (?, ?)", (name, value))
+
+    def all_names(self):
+        return self.fetchall("select name, value from env")
+
 
 def need_db(fn):
     """Decorator for command handlers that need an open database."""
+    @functools.wraps(fn)
     def _dec(self, *args, **kwargs):
         if not self.db:
             print "Need an open database"
@@ -196,6 +205,7 @@ def need_db(fn):
 
 def handle_sql_error(fn):
     """Decorator for command handlers that accept user SQL, to handle errors."""
+    @functools.wraps(fn)
     def _dec(self, *args, **kwargs):
         try:
             return fn(self, *args, **kwargs)
@@ -213,7 +223,12 @@ class MemSeeApp(cmd.Cmd):
     def __init__(self):
         cmd.Cmd.__init__(self)  # cmd.Cmd isn't an object()!
         self.db = None
+        self.reset()
+
+    def reset(self):
         self.results = []
+        self.env = {}
+        self.rev_env = {}
 
     def emptyline(self):
         pass
@@ -233,9 +248,12 @@ class MemSeeApp(cmd.Cmd):
         words = line.split()
         if len(words) > 1:
             self.default(line)
+            return
+
         dbfile = words[0]
         self.db = MemSeeDb(dbfile)
         self.db.create_schema()
+        self.reset()
 
     def do_open(self, line):
         """Open a database: open DBFILE"""
@@ -245,12 +263,25 @@ class MemSeeApp(cmd.Cmd):
         words = line.split()
         if len(words) > 1:
             self.default(line)
+            return
+
         dbfile = os.path.expanduser(words[0])
         self.db = MemSeeDb(dbfile)
+        self.reset()
+
+        # Load the defined names
+        for name, value in self.db.all_names():
+            self.env[name] = value
+            self.rev_env[value] = name
 
     @need_db
     def do_read(self, line):
-        """Read a data file: read DATAFILE"""
+        """Read a data file: read DATAFILE
+
+        Each file read becomes a new generation in the database.
+        The last file read is the default generation, in tables obj and ref.
+
+        """
         if not line:
             print "Need a file to read"
             return
@@ -283,6 +314,7 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     def do_stats(self, line):
+        """Print object and reference counts, and total size."""
         print "{.both} objects, {.both} references, {.both} total bytes".format(
             Num(self.db.num_objects()),
             Num(self.db.num_refs()),
@@ -313,7 +345,7 @@ class MemSeeApp(cmd.Cmd):
         print self.db.fetchone(query, (address,))
 
     def replace_result(self, m):
-        """re.sub function for #\d.\d in SQL."""
+        """re.sub function for #\d+.\d+ in SQL."""
         res = int(m.group(1))
         row = int(m.group(2))
         try:
@@ -321,17 +353,28 @@ class MemSeeApp(cmd.Cmd):
         except IndexError:
             raise SubstitutionError("Result reference out of range: {}".format(m.group()))
 
-    def substitute_sql(self, sql):
+    def replace_env(self, m):
+        """re.sub function for $\w+ in SQL."""
+        try:
+            return self.env[m.group(1)]
+        except KeyError:
+            raise SubstitutionError("Name reference undefined: {}".format(m.group()))
+
+    def substitute_symbols(self, sql):
         """Replace tokens in `sql`."""
         # replace #num.num with ids lifted from results.
         sql = re.sub(r"#(\d+)\.(\d+)", self.replace_result, sql)
+        sql = re.sub(r"\$(\w+)", self.replace_env, sql)
         return sql
 
     def fix_cell(self, c):
         """Fix cell data for good presentation."""
         if isinstance(c, (int, long)):
             # tabulate gets long ints wrong, make them strings.
-            return str(c)
+            c = str(c)
+            if c in self.rev_env:
+                c = "$" + self.rev_env[c]
+            return c
         if isinstance(c, (str, unicode)):
             # Scrub things that will mess with the output.
             return c.replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
@@ -360,8 +403,14 @@ class MemSeeApp(cmd.Cmd):
     @need_db
     @handle_sql_error
     def do_select(self, line):
-        """Perform a query against the SQLite db."""
-        query = self.substitute_sql("select " + line)
+        """Perform a query against the SQLite db.
+
+        If the query has an address column, then rows are labelled like #2.5.
+        Row numbers can be used in queries to use that row's address.
+
+        Defined names (see the set command) can be used like $name.
+        """
+        query = self.substitute_symbols("select " + line)
         results = self.db.fetchall(query, header=True)
         names = list(next(results))
         if 'address' in names:
@@ -377,8 +426,11 @@ class MemSeeApp(cmd.Cmd):
     @need_db
     @handle_sql_error
     def do_delete(self, line):
-        """Execute a delete statement against the SQLite db."""
-        query = self.substitute_sql("delete " + line)
+        """Execute a delete statement against the SQLite db.
+
+        See the select command for available shorthands.
+        """
+        query = self.substitute_symbols("delete " + line)
         nrows = self.db.execute(query)
         print "{} rows deleted".format(nrows)
 
@@ -407,7 +459,17 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     def do_gen(self, line):
-        """Examine or switch generations."""
+        """Examine or switch generations.
+
+        Each data file read becomes a new generation.  The current generation
+        is available in tables obj and ref.  Other generations are in tables
+        objN and refN, where N is the generation number.
+
+        "gen 3" will switch to generation 3, making its data available in obj
+        and ref.  At that point, obj3 and ref3 are no longer available.
+        "gen none" puts all generations into their numbered tables, and no
+        obj or ref table exists.
+        """
         words = line.split()
         gens = self.db.fetchint("select count(*) from gen")
         if not words:
@@ -429,6 +491,26 @@ class MemSeeApp(cmd.Cmd):
                 msg = "Using generation {gen} of {gens}"
             self.db.switch_to_generation(gen)
             print msg.format(gen=gen, gens=gens)
+
+    @need_db
+    def do_set(self, line):
+        """Set or examine named values.
+
+        "set NAME VALUE" defines a new name.  VALUE can contain other names,
+        or row numbers.
+
+        "set" prints all the defined values.
+        """
+        if not line:
+            print tabulate(sorted(self.env.items()), headers=["name", "value"])
+        else:
+            words = self.substitute_symbols(line).split()
+            if len(words) != 2:
+                return self.default(line)
+            name, value = words
+            self.env[name] = value
+            self.rev_env[value] = name
+            self.db.define_name(name, value)
 
 
 class MemSeeException(Exception):
