@@ -10,7 +10,7 @@ import sqlite3
 import sys
 import time
 
-from tabulate import tabulate
+from grid import GridWriter
 
 
 # Data is like:
@@ -126,7 +126,7 @@ class MemSeeDb(object):
                     objdata.get('name'),
                     objdata.get('value'),
                     objdata['size'],
-                    objdata.get('len', 0),
+                    objdata.get('len'),
                 )
             )
             objs += 1
@@ -224,6 +224,20 @@ class MemSeeApp(cmd.Cmd):
         cmd.Cmd.__init__(self)  # cmd.Cmd isn't an object()!
         self.db = None
         self.reset()
+
+        self.column_formats = {
+            '#': '<7',
+
+            'address': '>15',
+            'type': '<20',
+            'name': '<20',
+            'value': '<60',
+            'size': '>10',
+            'len': '>10',
+
+            'parent': '>15',
+            'child': '>15',
+        }
 
     def reset(self):
         self.results = []
@@ -369,15 +383,16 @@ class MemSeeApp(cmd.Cmd):
 
     def fix_cell(self, c):
         """Fix cell data for good presentation."""
+        if c is None:
+            c = u"\N{RING OPERATOR}"
         if isinstance(c, (int, long)):
-            # tabulate gets long ints wrong, make them strings.
             c = str(c)
             if c in self.rev_env:
                 c = "$" + self.rev_env[c]
             return c
         if isinstance(c, (str, unicode)):
             # Scrub things that will mess with the output.
-            return c.replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
+            c = c.replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
         return c
 
     def process_row(self, data, names):
@@ -414,14 +429,15 @@ class MemSeeApp(cmd.Cmd):
         results = self.db.fetchall(query, header=True)
         names = list(next(results))
         if 'address' in names:
-            headers = [''] + names
+            headers = ['#'] + names
         else:
             headers = names
 
-        print tabulate(
-            self.process_row(results, names),
-            headers=headers,
-        )
+        # Show the results.
+        formats = [self.column_formats.get(h, '<10') for h in headers]
+        gw = GridWriter(formats=formats, out=sys.stdout)
+        gw.header(headers)
+        gw.rows(self.process_row(results, names))
 
     @need_db
     @handle_sql_error
@@ -502,15 +518,34 @@ class MemSeeApp(cmd.Cmd):
         "set" prints all the defined values.
         """
         if not line:
-            print tabulate(sorted(self.env.items()), headers=["name", "value"])
+            gw = GridWriter(["<15", "<30"])
+            gw.header(["name", "value"])
+            gw.rows(sorted(self.env.items()))
         else:
-            words = self.substitute_symbols(line).split()
+            words = self.substitute_symbols(line).split(None, 1)
             if len(words) != 2:
                 return self.default(line)
             name, value = words
             self.env[name] = value
             self.rev_env[value] = name
             self.db.define_name(name, value)
+
+    def do_width(self, line):
+        """Set the widths for columns: WIDTH colname width ..."""
+        words = line.split()
+        if len(words) % 2 != 0:
+            print "Need pairs: colname width ..."
+            return
+        while words:
+            colname, width = words[:2]
+            words = words[2:]
+            try:
+                width = int(width)
+            except ValueError:
+                print "This isn't a width: {!r}".format(width)
+                return
+            align = self.column_formats.get(colname, "<")[0]
+            self.column_formats[colname] = "{}{}".format(align, width)
 
 
 class MemSeeException(Exception):
