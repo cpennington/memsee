@@ -212,7 +212,7 @@ def need_db(fn):
         return fn(self, *args, **kwargs)
     return _dec
 
-def handle_sql_error(fn):
+def handle_errors(fn):
     """Decorator for command handlers that accept user SQL, to handle errors."""
     @functools.wraps(fn)
     def _dec(self, *args, **kwargs):
@@ -387,28 +387,48 @@ class MemSeeApp(cmd.Cmd):
         query = "select * from obj, ref where obj.address = ?"
         print self.db.fetchone(query, (address,))
 
-    def replace_result(self, m):
-        """re.sub function for #\d+.\d+ in SQL."""
-        res = int(m.group(1))
-        row = int(m.group(2))
-        try:
-            results = self.results[res]
-            return str(results['data'][row][results['id_column']])
-        except IndexError:
-            raise SubstitutionError("Result reference out of range: {}".format(m.group()))
-
-    def replace_env(self, m):
-        """re.sub function for $\w+ in SQL."""
-        try:
-            return self.env[m.group(1)]
-        except KeyError:
-            raise SubstitutionError("Name reference undefined: {}".format(m.group()))
-
     def substitute_symbols(self, sql):
         """Replace tokens in `sql`."""
+        def replace_result(m):
+            """re.sub function for #\d+.\d+ in SQL."""
+            resnum = int(m.group(1))
+            rownum = int(m.group(2))
+            try:
+                results = self.results[resnum]
+                row = results['data'][rownum]
+            except IndexError:
+                raise SubstitutionError("Result reference out of range: {}".format(m.group()))
+            id_column = results['id_column']
+            if id_column is None:
+                raise SubstitutionError("Results had no address column: {}".format(m.group()))
+
+            return str(row[id_column])
+
+        def replace_column(m):
+            """re.sub function for #\d+.\w+ in SQL."""
+            resnum = int(m.group(1))
+            column = m.group(2)
+            try:
+                results = self.results[resnum]
+            except IndexError:
+                raise SubstitutionError("Result reference out of range: {}".format(m.group()))
+            try:
+                colnum = results['names'].index(column)
+            except ValueError:
+                raise SubstitutionError("No such column: {}".format(m.group()))
+            return "({})".format(",".join(str(r[colnum]) for r in results['data']))
+
+        def replace_env(m):
+            """re.sub function for $\w+ in SQL."""
+            try:
+                return self.env[m.group(1)]
+            except KeyError:
+                raise SubstitutionError("Name reference undefined: {}".format(m.group()))
+
         # replace #num.num with ids lifted from results.
-        sql = re.sub(r"#(\d+)\.(\d+)", self.replace_result, sql)
-        sql = re.sub(r"\$([\w.:]+)", self.replace_env, sql)
+        sql = re.sub(r"#(\d+)\.(\d+)", replace_result, sql)
+        sql = re.sub(r"#(\d+)\.(\w+)", replace_column, sql)
+        sql = re.sub(r"\$([\w.:]+)", replace_env, sql)
         return sql
 
     def fix_cell(self, c):
@@ -435,7 +455,7 @@ class MemSeeApp(cmd.Cmd):
                 yield new_row
 
     @need_db
-    @handle_sql_error
+    @handle_errors
     def do_select(self, line):
         """Perform a query against the SQLite db.
 
@@ -461,17 +481,13 @@ class MemSeeApp(cmd.Cmd):
         data = list(results)
 
         id_column = self.id_column(names)
-        if id_column is not None:
-            headers = ['#'] + names
-            id_fmt = "#{}.{{}}".format(len(self.results))
-            self.results.append({
-                'names': names,
-                'data': data,
-                'id_column': id_column,
-            })
-        else:
-            headers = names
-            id_fmt = None
+        headers = ['#'] + names
+        id_fmt = "#{}.{{}}".format(len(self.results))
+        self.results.append({
+            'names': names,
+            'data': data,
+            'id_column': id_column,
+        })
 
         # Show the results.
         formats = [self.column_formats.get(h, '<10') for h in headers]
@@ -482,7 +498,7 @@ class MemSeeApp(cmd.Cmd):
         return data
 
     @need_db
-    @handle_sql_error
+    @handle_errors
     def do_delete(self, line):
         """Execute a delete statement against the SQLite db.
 
@@ -571,6 +587,12 @@ class MemSeeApp(cmd.Cmd):
             self.env[name] = value
             self.rev_env[value] = name
             self.db.define_name(name, value)
+
+    @handle_errors
+    def do_echo(self, line):
+        """Show the value of an expression."""
+        line = self.substitute_symbols(line)
+        print line
 
     def do_width(self, line):
         """Set the widths for columns: WIDTH colname width ..."""
