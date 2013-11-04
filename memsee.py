@@ -156,9 +156,18 @@ class MemSeeDb(object):
         self.conn.commit()
         return c.rowcount
 
+    DEBUG = False
+
     def fetchall(self, query, args=(), header=False):
         c = self.conn.cursor()
+        if self.DEBUG:
+            print query
+            if args:
+                print args
+            start = time.time()
         c.execute(query, args)
+        if self.DEBUG:
+            print "({:.2f}s)".format(time.time() - start)
         if header:
             yield [d[0] for d in c.description]
         for row in c.fetchall():
@@ -226,21 +235,41 @@ class MemSeeApp(cmd.Cmd):
         self.reset()
 
         self.column_formats = {
-            '#': '<7',
+            '#': '<8',
 
-            'address': '>15',
+            # obj columns
+            'address': '>16',
             'type': '<20',
             'name': '<20',
             'value': '<60',
             'size': '>10',
             'len': '>10',
 
+            # ref columns
             'parent': '>15',
             'child': '>15',
+
+            # ad-hoc columns
+            'count(*)': '>10',
+            'num': '>10',
+            'refs': '>10',
+            'n': '>10',
         }
 
     def reset(self):
+        # results is a list of dicts:
+        #   [{
+        #       'data': [[col, col, col, ...],
+        #                [col, col, col, ...],
+        #                ...
+        #               ],
+        #       'names': ['col1', 'col2', 'col3', ...],
+        #       'id_column': 0,
+        #   }, ...
+        #   ]
         self.results = []
+
+        # env is a map from names to values, rev_env is values to names.
         self.env = {}
         self.rev_env = {}
 
@@ -363,7 +392,8 @@ class MemSeeApp(cmd.Cmd):
         res = int(m.group(1))
         row = int(m.group(2))
         try:
-            return str(self.results[res][row])
+            results = self.results[res]
+            return str(results['data'][row][results['id_column']])
         except IndexError:
             raise SubstitutionError("Result reference out of range: {}".format(m.group()))
 
@@ -395,23 +425,12 @@ class MemSeeApp(cmd.Cmd):
             c = c.replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
         return c
 
-    def process_row(self, data, names):
+    def process_rows(self, data, id_fmt):
         """Process a row for output."""
-        ids = 'address' in names
-        if ids:
-            # These results have object addresses, save them away.
-            row_ids = []
-            res_num = len(self.results)
-            self.results.append(row_ids)
-            address_idx = names.index('address')
-
         for i, row in enumerate(data):
             new_row = [self.fix_cell(c) for c in row]
-            if ids:
-                # Since we have ids, show what number they're saved as.
-                row_id = "#{}.{}".format(res_num, i)
-                row_ids.append(row[address_idx])
-                yield [row_id] + new_row
+            if id_fmt is not None:
+                yield [id_fmt.format(i)] + new_row
             else:
                 yield new_row
 
@@ -426,18 +445,41 @@ class MemSeeApp(cmd.Cmd):
         Defined names (see the set command) can be used like $name.
         """
         query = self.substitute_symbols("select " + line)
-        results = self.db.fetchall(query, header=True)
+        self.show_select(query)
+
+    def id_column(self, names):
+        """Return the index of the id column in `names`, or None."""
+        try:
+            return names.index('address')
+        except ValueError:
+            return None
+
+    def show_select(self, query, args=(), show_headers=True):
+        results = self.db.fetchall(query, args, header=True)
+
         names = list(next(results))
-        if 'address' in names:
+        data = list(results)
+
+        id_column = self.id_column(names)
+        if id_column is not None:
             headers = ['#'] + names
+            id_fmt = "#{}.{{}}".format(len(self.results))
+            self.results.append({
+                'names': names,
+                'data': data,
+                'id_column': id_column,
+            })
         else:
             headers = names
+            id_fmt = None
 
         # Show the results.
         formats = [self.column_formats.get(h, '<10') for h in headers]
         gw = GridWriter(formats=formats, out=sys.stdout)
-        gw.header(headers)
-        gw.rows(self.process_row(results, names))
+        gw.header(headers if show_headers else None)
+        gw.rows(self.process_rows(data, id_fmt))
+
+        return data
 
     @need_db
     @handle_sql_error
@@ -546,6 +588,34 @@ class MemSeeApp(cmd.Cmd):
                 return
             align = self.column_formats.get(colname, "<")[0]
             self.column_formats[colname] = "{}{}".format(align, width)
+
+    def do_kids(self, line):
+        """Display object descending from an object."""
+        words = self.substitute_symbols(line).split()
+        if len(words) != 1:
+            print "Need an object address."
+            return
+        id = int(words[0])
+        self.show_select("select * from obj where address = ?", (id,))
+
+        ids_to_show = set([id])
+        ids_shown = set()
+        while ids_to_show:
+            ids_shown.update(ids_to_show)
+            id_list = ",".join(str(i) for i in ids_to_show)
+
+            print
+            children = self.show_select("""
+                select
+                    obj.*,
+                    (select count(*) from ref where child = obj.address) refs
+                from obj
+                where address in (select child from ref where parent in ({}))
+                """.format(id_list),
+                show_headers=False,
+            )
+            child_ids = set(r[0] for r in children if r[-1] == 1)
+            ids_to_show = child_ids - ids_shown
 
 
 class MemSeeException(Exception):

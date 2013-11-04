@@ -19,7 +19,8 @@ class GridWriter(object):
         self.out.write(self.fmt.format(*data))
 
     def header(self, headers):
-        self.row(headers)
+        if headers:
+            self.row(headers)
         self.lines()
 
     def rows(self, iterable):
