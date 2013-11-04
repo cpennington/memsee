@@ -389,6 +389,23 @@ class MemSeeApp(cmd.Cmd):
 
     def substitute_symbols(self, sql):
         """Replace tokens in `sql`."""
+        def replace_relationship(m):
+            """re.sub function for ^ and & in SQL."""
+            ref = m.group(1)
+            ops = m.group(2)
+            ref = self.substitute_symbols(ref)
+            for op in ops:
+                if ref.startswith("("):
+                    condition = "IN"
+                else:
+                    condition = "="
+                if op == "^":
+                    sql = "(select parent from ref where child {condition} {ref})"
+                else:
+                    sql = "(select child from ref where parent {condition} {ref})"
+                ref = sql.format(condition=condition, ref=ref)
+            return ref
+
         def replace_result(m):
             """re.sub function for #\d+.\d+ in SQL."""
             resnum = int(m.group(1))
@@ -423,9 +440,9 @@ class MemSeeApp(cmd.Cmd):
             try:
                 return self.env[m.group(1)]
             except KeyError:
-                raise SubstitutionError("Name reference undefined: {}".format(m.group()))
+                raise SubstitutionError("Named reference undefined: {}".format(m.group()))
 
-        # replace #num.num with ids lifted from results.
+        sql = re.sub(r"([#$]?[\w.:]+)([&^]+)", replace_relationship, sql)
         sql = re.sub(r"#(\d+)\.(\d+)", replace_result, sql)
         sql = re.sub(r"#(\d+)\.(\w+)", replace_column, sql)
         sql = re.sub(r"\$([\w.:]+)", replace_env, sql)
