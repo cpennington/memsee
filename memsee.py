@@ -408,7 +408,7 @@ class MemSeeApp(cmd.Cmd):
         """Replace tokens in `sql`."""
         # replace #num.num with ids lifted from results.
         sql = re.sub(r"#(\d+)\.(\d+)", self.replace_result, sql)
-        sql = re.sub(r"\$(\w+)", self.replace_env, sql)
+        sql = re.sub(r"\$([\w.:]+)", self.replace_env, sql)
         return sql
 
     def fix_cell(self, c):
