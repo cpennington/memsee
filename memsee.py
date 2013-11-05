@@ -8,6 +8,7 @@ import json
 import os
 import re
 import readline
+import shutil
 import sqlite3
 import sys
 import time
@@ -536,6 +537,25 @@ class MemSeeApp(cmd.Cmd):
         query = self.substitute_symbols("delete " + line)
         nrows = self.db.execute(query)
         print "{} rows deleted".format(nrows)
+
+    @need_db
+    def do_backup(self, _line):
+        backup = self.db.filename + '.bak'
+        if os.path.exists(backup):
+            print "DB already backed up"
+            return
+        else:
+            shutil.copyfile(self.db.filename, backup)
+
+    @need_db
+    def do_restore(self, _line):
+        backup = self.db.filename + '.bak'
+        if not os.path.exists(backup):
+            print "No backed up DB"
+            return
+        else:
+            shutil.copyfile(backup, self.db.filename)
+            self.db = MemSeeDb(self.db.filename)
 
     @need_db
     def do_gc(self, line):
