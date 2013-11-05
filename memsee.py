@@ -1,16 +1,29 @@
 #!/usr/bin/env python
 
+import atexit
 import cmd
 import functools
 import gzip
 import json
 import os
 import re
+import readline
+import shutil
 import sqlite3
 import sys
 import time
 
 from grid import GridWriter
+
+# Set up readline history across invocations
+histfile = os.path.join(os.path.expanduser('~'), '.memsee_history')
+try:
+    readline.read_history_file(histfile)
+except IOError:
+    pass
+
+atexit.register(readline.write_history_file, histfile)
+del histfile
 
 
 # Data is like:
@@ -524,6 +537,33 @@ class MemSeeApp(cmd.Cmd):
         query = self.substitute_symbols("delete " + line)
         nrows = self.db.execute(query)
         print "{} rows deleted".format(nrows)
+
+    @need_db
+    @handle_errors
+    def do_pin(self, condition):
+        """Prevent all objects in obj selected by `condition` from being deleted by `gc`"""
+        query = self.substitute_sql('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
+        nrows = self.db.execute(query)
+        print "{} rows pinned".format(nrows)
+
+    @need_db
+    def do_backup(self, _line):
+        backup = self.db.filename + '.bak'
+        if os.path.exists(backup):
+            print "DB already backed up"
+            return
+        else:
+            shutil.copyfile(self.db.filename, backup)
+
+    @need_db
+    def do_restore(self, _line):
+        backup = self.db.filename + '.bak'
+        if not os.path.exists(backup):
+            print "No backed up DB"
+            return
+        else:
+            shutil.copyfile(backup, self.db.filename)
+            self.db = MemSeeDb(self.db.filename)
 
     @need_db
     def do_gc(self, line):
