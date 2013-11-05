@@ -1,16 +1,28 @@
 #!/usr/bin/env python
 
+import atexit
 import cmd
 import functools
 import gzip
 import json
 import os
 import re
+import readline
 import sqlite3
 import sys
 import time
 
 from grid import GridWriter
+
+# Set up readline history across invocations
+histfile = os.path.join(os.path.expanduser('~'), '.memsee_history')
+try:
+    readline.read_history_file(histfile)
+except IOError:
+    pass
+
+atexit.register(readline.write_history_file, histfile)
+del histfile
 
 
 # Data is like:
