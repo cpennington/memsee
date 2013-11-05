@@ -15,16 +15,6 @@ import time
 
 from grid import GridWriter
 
-# Set up readline history across invocations
-histfile = os.path.join(os.path.expanduser('~'), '.memsee_history')
-try:
-    readline.read_history_file(histfile)
-except IOError:
-    pass
-
-atexit.register(readline.write_history_file, histfile)
-del histfile
-
 
 # Data is like:
 #
@@ -270,6 +260,7 @@ class MemSeeApp(cmd.Cmd):
         }
 
     def reset(self):
+        """Reset the db-derived state of the app."""
         # results is a list of dicts:
         #   [{
         #       'data': [[col, col, col, ...],
@@ -286,7 +277,25 @@ class MemSeeApp(cmd.Cmd):
         self.env = {}
         self.rev_env = {}
 
+    def install_readline(self):
+        """Set up readline history across invocations."""
+        histfile = os.path.join(os.path.expanduser('~'), '.memsee_history')
+        try:
+            readline.read_history_file(histfile)
+        except IOError:
+            pass
+
+        atexit.register(readline.write_history_file, histfile)
+
+    def main(self, argv):
+        """The main command loop."""
+        self.install_readline()
+        if len(argv) > 1:
+            self.do_open(argv[1])
+        self.cmdloop()
+
     def emptyline(self):
+        """Override Cmd.emptyline so that empty lines do nothing."""
         pass
 
     def default(self, line):
@@ -542,12 +551,13 @@ class MemSeeApp(cmd.Cmd):
     @handle_errors
     def do_pin(self, condition):
         """Prevent all objects in obj selected by `condition` from being deleted by `gc`"""
-        query = self.substitute_sql('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
+        query = self.substitute_symbols('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
         nrows = self.db.execute(query)
         print "{} rows pinned".format(nrows)
 
     @need_db
     def do_backup(self, _line):
+        """Copy the database for safe-keeping.  Only one level."""
         backup = self.db.filename + '.bak'
         if os.path.exists(backup):
             print "DB already backed up"
@@ -557,6 +567,7 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     def do_restore(self, _line):
+        """Restore a saved-away database."""
         backup = self.db.filename + '.bak'
         if not os.path.exists(backup):
             print "No backed up DB"
@@ -705,7 +716,4 @@ class SubstitutionError(MemSeeException):
 
 
 if __name__ == "__main__":
-    app = MemSeeApp()
-    if len(sys.argv) > 1:
-        app.do_open(sys.argv[1])
-    app.cmdloop()
+    MemSeeApp().main(sys.argv)
