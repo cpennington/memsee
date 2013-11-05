@@ -539,6 +539,14 @@ class MemSeeApp(cmd.Cmd):
         print "{} rows deleted".format(nrows)
 
     @need_db
+    @handle_errors
+    def do_pin(self, condition):
+        """Prevent all objects in obj selected by `condition` from being deleted by `gc`"""
+        query = self.substitute_sql('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
+        nrows = self.db.execute(query)
+        print "{} rows pinned".format(nrows)
+
+    @need_db
     def do_backup(self, _line):
         backup = self.db.filename + '.bak'
         if os.path.exists(backup):
