@@ -161,6 +161,13 @@ class MemSeeDb(object):
         self.conn.commit()
         return c.rowcount
 
+    def executemany(self, query, arglist=()):
+        """Execute a SQL query many times over a list of arguments."""
+        c = self.conn.cursor()
+        c.executemany(query, arglist)
+        self.conn.commit()
+        return c.rowcount
+
     DEBUG = False
 
     def fetchall(self, query, args=(), header=False):
@@ -747,7 +754,7 @@ class MemSeeApp(cmd.Cmd):
         # Prime the table with the first set of objects.
         self.db.execute("""
             insert into temp_path (depth, address, path)
-            select 0, address, '' from obj where {}
+            select 0, address, address from obj where {}
             """.format(from_cond)
         )
 
@@ -764,22 +771,26 @@ class MemSeeApp(cmd.Cmd):
             ids = list(ids)
             if ids:
                 # Found something! Get the path and show it.
-                # TODO: show the path from top to bottom.
-                self.show_select("""
-                    select * from obj where address = {}
-                    """.format(ids[0][0])
-                )
-                break
+                path = self.db.fetchone("select path from temp_path where address = ?", (ids[0][0], ))
+                path = path[0].split(' ')
+
+                self.db.execute("drop table if exists tmp_path_order")
+                self.db.execute("create table tmp_path_order (idx int, address int)")
+                self.db.executemany("insert into tmp_path_order (idx, address) values (?, ?)", enumerate(path))
+                self.show_select("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
+                return
 
             # Iterate to the next depth.
-            self.db.execute("""
+            num_searched = self.db.execute("""
                 insert into temp_path (depth, address, path)
-                select depth+1, child, path||" "||address
+                select depth+1, child, path||" "||child
                 from temp_path, ref
                 where depth={depth}
                 and ref.parent = address
+                and ref.child not in (select address from temp_path)
                 """.format(depth=depth)
             )
+            print "Added {} path to newly discoverd nodes".format(num_searched)
         #TODO: This won't realize it's finding nothing, and will loop forever.
 
 
