@@ -4,10 +4,12 @@ import atexit
 import cmd
 import functools
 import gzip
+import itertools
 import json
 import os
 import re
 import readline
+import shlex
 import shutil
 import sqlite3
 import sys
@@ -155,7 +157,7 @@ class MemSeeDb(object):
     def execute(self, query, args=()):
         """For running SQL that makes changes, and doesn't expect results."""
         c = self.conn.cursor()
-        c.execute(query, args)
+        self.do_execute(c, query, args)
         self.conn.commit()
         return c.rowcount
 
@@ -163,18 +165,21 @@ class MemSeeDb(object):
 
     def fetchall(self, query, args=(), header=False):
         c = self.conn.cursor()
+        self.do_execute(c, query, args)
+        if header:
+            yield [d[0] for d in c.description]
+        for row in c.fetchall():
+            yield row
+
+    def do_execute(self, cursor, query, args):
         if self.DEBUG:
             print query
             if args:
                 print args
             start = time.time()
-        c.execute(query, args)
+        cursor.execute(query, args)
         if self.DEBUG:
             print "({:.2f}s)".format(time.time() - start)
-        if header:
-            yield [d[0] for d in c.description]
-        for row in c.fetchall():
-            yield row
 
     def fetchone(self, query, args=()):
         c = self.conn.cursor()
@@ -251,6 +256,9 @@ class MemSeeApp(cmd.Cmd):
             # ref columns
             'parent': '>15',
             'child': '>15',
+
+            # temp_path columns
+            'path': '<80',
 
             # ad-hoc columns
             'count(*)': '>10',
@@ -538,6 +546,17 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
+    def do_insert(self, line):
+        """Execute a insert statement against the SQLite db.
+
+        See the select command for available shorthands.
+        """
+        query = self.substitute_symbols("insert " + line)
+        nrows = self.db.execute(query)
+        print "{} rows inserted".format(nrows)
+
+    @need_db
+    @handle_errors
     def do_delete(self, line):
         """Execute a delete statement against the SQLite db.
 
@@ -706,6 +725,62 @@ class MemSeeApp(cmd.Cmd):
             )
             child_ids = set(r[0] for r in children if r[-1] == 1)
             ids_to_show = child_ids - ids_shown
+
+    @need_db
+    @handle_errors
+    def do_path(self, line):
+        """Find a path from one set of objects to another."""
+        words = shlex.split(self.substitute_symbols(line).encode('utf8'))
+        if len(words) != 4 or words[0] != "from" or words[2] != "to":
+            print 'Syntax:  path from "condition1" to "condition2"'
+            return
+        from_cond = words[1]
+        to_cond = words[3]
+
+        # Create the work table.
+        self.db.execute("""
+            create table if not exists
+            temp_path (depth int, address int, path text)
+            """)
+        self.db.execute("""delete from temp_path""")
+
+        # Prime the table with the first set of objects.
+        self.db.execute("""
+            insert into temp_path (depth, address, path)
+            select 0, address, '' from obj where {}
+            """.format(from_cond)
+        )
+
+        # Loop down the children looking for the to_cond condition.
+        for depth in itertools.count():
+            # Check if the current generation meets the ending condition.
+            ids = self.db.fetchall("""
+                select address from obj
+                where address in (select address from temp_path where depth = {depth})
+                and ({to_cond})
+                limit 1
+                """.format(depth=depth, to_cond=to_cond)
+            )
+            ids = list(ids)
+            if ids:
+                # Found something! Get the path and show it.
+                # TODO: show the path from top to bottom.
+                self.show_select("""
+                    select * from obj where address = {}
+                    """.format(ids[0][0])
+                )
+                break
+
+            # Iterate to the next depth.
+            self.db.execute("""
+                insert into temp_path (depth, address, path)
+                select depth+1, child, path||" "||address
+                from temp_path, ref
+                where depth={depth}
+                and ref.parent = address
+                """.format(depth=depth)
+            )
+        #TODO: This won't realize it's finding nothing, and will loop forever.
 
 
 class MemSeeException(Exception):
