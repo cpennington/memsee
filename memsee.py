@@ -849,6 +849,14 @@ class MemSeeApp(cmd.Cmd):
             """
         )
 
+
+    @need_db
+    @handle_errors
+    def do_shell(self, line):
+        """Execute a raw sqlite command against the connected database"""
+        self.db.execute(self.substitute_symbols(line))
+
+
 class MemSeeException(Exception):
     pass
 
