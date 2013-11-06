@@ -810,6 +810,44 @@ class MemSeeApp(cmd.Cmd):
             print "Added {} path to newly discoverd nodes".format(num_searched)
         #TODO: This won't realize it's finding nothing, and will loop forever.
 
+    @need_db
+    @handle_errors
+    def do_ancestor_types(self, condition):
+        """Display the set of types in each generation of ancestors of the objects selected by `condition`"""
+        self.db.execute('drop table if exists tmp_ancestor_types')
+        self.db.execute("create table tmp_ancestor_types (address int, type text, gen int, refs int, PRIMARY KEY (address, refs))")
+        gen = 0
+        inserted = self.db.execute("insert into tmp_ancestor_types select address, type, 0, 0 from obj where {}".format(condition))
+
+        while inserted > 0:
+            inserted = self.db.execute(
+                """INSERT INTO tmp_ancestor_types
+                        SELECT DISTINCT r.parent, parent.type, (?1 + 1), r.child
+                          FROM ref r LEFT OUTER JOIN tmp_ancestor_types seen
+                            ON r.parent = seen.address
+                           AND r.child = seen.refs,
+                               obj parent, tmp_ancestor_types child
+                         WHERE r.parent = parent.address
+                           AND r.child = child.address
+                           AND seen.address is NULL
+                           AND child.gen = ?1
+                           AND child.type not in ('module', 'Settings')
+                """,
+                (gen, )
+            )
+            gen += 1
+
+        self.show_select(
+            """SELECT gen, type, count(*)
+                 FROM (
+                     SELECT max(gen) AS gen, type
+                       FROM tmp_ancestor_types
+                   GROUP BY address
+                 )
+             GROUP BY gen, type
+             ORDER BY gen, type
+            """
+        )
 
 class MemSeeException(Exception):
     pass
