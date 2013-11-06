@@ -61,11 +61,12 @@ class MemSeeDb(object):
 
     # Schema for each generation, each is its own set of tables and indexes.
     GEN_SCHEMA = [
-        "create table obj (address int primary key, type text, name text, value text, size int, len int);",
+        "create table obj (address int primary key, type text, name text, value text, size int, len int, mark int);",
         "create index size{gen} on obj (size);",
         "create index type{gen} on obj (type);",
         "create index name{gen} on obj (name);",
         "create index value{gen} on obj (value);",
+        "create index mark{gen} on obj (mark);",
 
         "create table ref (parent int, child int);",
         "create index parent{gen} on ref (parent);",
@@ -605,25 +606,41 @@ class MemSeeApp(cmd.Cmd):
     @need_db
     def do_gc(self, line):
         """Delete orphan objects and their references, recursively."""
-        num_objects = self.db.num_objects()
-        num_refs = self.db.num_refs()
+        self.db.execute("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
+        num_marked = self.db.execute(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
+        print "Marked {} top level objects".format(num_marked)
+        self.do_continue_gc(line)
+
+    @need_db
+    def do_continue_gc(self, line):
+        """Continue a previously interrupted garbage collection"""
+
+        depth = self.db.fetchint("select max(mark) from obj")
 
         while True:
-            self.db.execute("delete from ref where parent != 0 and parent not in (select address from obj)")
-            new_num_refs = self.db.num_refs()
-            print "Deleted {} references, total is {}".format((num_refs - new_num_refs), new_num_refs)
-            if new_num_refs == num_refs:
-                print "Done."
-                break
-            num_refs = new_num_refs
+            num_marked = self.db.execute(
+                """UPDATE obj
+                      SET mark = ?1 + 1
+                    WHERE address IN (
+                          SELECT child
+                            FROM ref, obj p, obj c
+                           WHERE ref.parent = p.address
+                             AND ref.child = c.address
+                             AND p.mark = ?1
+                             AND c.mark is NULL
+                          )
+                """,
+                (depth, ))
 
-            self.db.execute("delete from obj where address not in (select child from ref)")
-            new_num_objects = self.db.num_objects()
-            print "Deleted {} objects, total is {}".format((num_objects - new_num_objects), new_num_objects)
-            if new_num_objects == num_objects:
-                print "Done."
+            if num_marked == 0:
+                print "Marking complete"
                 break
-            num_objects = new_num_objects
+
+            print "Marked {} objects at depth {}".format(num_marked, depth)
+            depth += 1
+
+        num_deleted = self.db.execute("DELETE FROM obj WHERE mark IS NULL")
+        print "Deleted {} objects".format(num_deleted)
 
     @need_db
     def do_gen(self, line):
