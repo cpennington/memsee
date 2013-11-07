@@ -826,6 +826,7 @@ class MemSeeApp(cmd.Cmd):
     @handle_errors
     def do_ancestor_types(self, condition):
         """Display the set of types in each generation of ancestors of the objects selected by `condition`"""
+        condition = self.substitute_symbols(condition)
         self.db.execute('drop table if exists tmp_ancestor_types')
         self.db.execute("create table tmp_ancestor_types (address int, type text, gen int, refs int, PRIMARY KEY (address, refs))")
         gen = 0
@@ -847,6 +848,7 @@ class MemSeeApp(cmd.Cmd):
                 """,
                 (gen, )
             )
+            print "Found {} new ancestors".format(inserted)
             gen += 1
 
         self.show_select(
