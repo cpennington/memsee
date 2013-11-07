@@ -757,11 +757,21 @@ class MemSeeApp(cmd.Cmd):
     def do_path(self, line):
         """Find a path from one set of objects to another."""
         words = shlex.split(self.substitute_symbols(line).encode('utf8'))
-        if len(words) != 4 or words[0] != "from" or words[2] != "to":
-            print 'Syntax:  path from "condition1" to "condition2"'
+        if (len(words) not in (4, 5)
+            or words[0] != "from"
+            or words[2] != "to"
+            or len(words) == 5 and words[4] != 'reversed'):
+            print 'Syntax:  path from "condition1" to "condition2" [reversed]'
             return
         from_cond = words[1]
         to_cond = words[3]
+        reversed = len(words) == 5
+
+        source = 'parent'
+        dest = 'child'
+
+        if reversed:
+            source, dest = dest, source
 
         # Create the work table.
         self.db.execute("""
@@ -802,14 +812,14 @@ class MemSeeApp(cmd.Cmd):
             # Iterate to the next depth.
             num_searched = self.db.execute("""
                 insert into temp_path (depth, address, path)
-                select depth+1, child, path||" "||child
+                select depth+1, {dest}, path||" "||{dest}
                 from temp_path, ref
                 where depth={depth}
-                and ref.parent = address
-                and ref.child not in (select address from temp_path)
-                """.format(depth=depth)
+                and ref.{source} = address
+                and ref.{dest} not in (select address from temp_path)
+                """.format(depth=depth, source=source, dest=dest)
             )
-            print "Added {} path to newly discoverd nodes".format(num_searched)
+            print "Added {} paths to newly discovered nodes".format(num_searched)
         #TODO: This won't realize it's finding nothing, and will loop forever.
 
     @need_db
