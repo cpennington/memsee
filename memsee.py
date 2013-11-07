@@ -605,6 +605,7 @@ class MemSeeApp(cmd.Cmd):
     @need_db
     def do_gc(self, line):
         """Delete orphan objects and their references, recursively."""
+        self.do_stats('')
         self.db.execute("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
         num_marked = self.db.execute(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
         print "Marked {} top level objects".format(num_marked)
@@ -640,6 +641,8 @@ class MemSeeApp(cmd.Cmd):
 
         num_deleted = self.db.execute("DELETE FROM obj WHERE mark IS NULL")
         print "Deleted {} objects".format(num_deleted)
+
+        self.do_stats('')
 
     @need_db
     def do_gen(self, line):
