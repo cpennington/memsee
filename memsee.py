@@ -61,14 +61,14 @@ class MemSeeDb(object):
 
     # Schema for each generation, each is its own set of tables and indexes.
     GEN_SCHEMA = [
-        "create table obj (address int primary key, type text, name text, value text, size int, len int);",
+        "create table obj (address int primary key, type text, name text, value text, size int, len int, mark int);",
         "create index size{gen} on obj (size);",
         "create index type{gen} on obj (type);",
         "create index name{gen} on obj (name);",
         "create index value{gen} on obj (value);",
+        "create index mark{gen} on obj (mark);",
 
-        "create table ref (parent int, child int);",
-        "create index parent{gen} on ref (parent);",
+        "create table ref (parent int, child int, PRIMARY KEY (parent, child));",
         "create index child{gen} on ref (child);",
     ]
     GEN_TABLES = ['obj', 'ref']
@@ -158,6 +158,13 @@ class MemSeeDb(object):
         """For running SQL that makes changes, and doesn't expect results."""
         c = self.conn.cursor()
         self.do_execute(c, query, args)
+        self.conn.commit()
+        return c.rowcount
+
+    def executemany(self, query, arglist=()):
+        """Execute a SQL query many times over a list of arguments."""
+        c = self.conn.cursor()
+        c.executemany(query, arglist)
         self.conn.commit()
         return c.rowcount
 
@@ -598,25 +605,44 @@ class MemSeeApp(cmd.Cmd):
     @need_db
     def do_gc(self, line):
         """Delete orphan objects and their references, recursively."""
-        num_objects = self.db.num_objects()
-        num_refs = self.db.num_refs()
+        self.do_stats('')
+        self.db.execute("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
+        num_marked = self.db.execute(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
+        print "Marked {} top level objects".format(num_marked)
+        self.do_continue_gc(line)
+
+    @need_db
+    def do_continue_gc(self, line):
+        """Continue a previously interrupted garbage collection"""
+
+        depth = self.db.fetchint("select max(mark) from obj")
 
         while True:
-            self.db.execute("delete from ref where parent != 0 and parent not in (select address from obj)")
-            new_num_refs = self.db.num_refs()
-            print "Deleted {} references, total is {}".format((num_refs - new_num_refs), new_num_refs)
-            if new_num_refs == num_refs:
-                print "Done."
-                break
-            num_refs = new_num_refs
+            num_marked = self.db.execute(
+                """UPDATE obj
+                      SET mark = ?1 + 1
+                    WHERE address IN (
+                          SELECT child
+                            FROM ref, obj p, obj c
+                           WHERE ref.parent = p.address
+                             AND ref.child = c.address
+                             AND p.mark = ?1
+                             AND c.mark is NULL
+                          )
+                """,
+                (depth, ))
 
-            self.db.execute("delete from obj where address not in (select child from ref)")
-            new_num_objects = self.db.num_objects()
-            print "Deleted {} objects, total is {}".format((num_objects - new_num_objects), new_num_objects)
-            if new_num_objects == num_objects:
-                print "Done."
+            if num_marked == 0:
+                print "Marking complete"
                 break
-            num_objects = new_num_objects
+
+            print "Marked {} objects at depth {}".format(num_marked, depth)
+            depth += 1
+
+        num_deleted = self.db.execute("DELETE FROM obj WHERE mark IS NULL")
+        print "Deleted {} objects".format(num_deleted)
+
+        self.do_stats('')
 
     @need_db
     def do_gen(self, line):
@@ -731,11 +757,21 @@ class MemSeeApp(cmd.Cmd):
     def do_path(self, line):
         """Find a path from one set of objects to another."""
         words = shlex.split(self.substitute_symbols(line).encode('utf8'))
-        if len(words) != 4 or words[0] != "from" or words[2] != "to":
-            print 'Syntax:  path from "condition1" to "condition2"'
+        if (len(words) not in (4, 5)
+            or words[0] != "from"
+            or words[2] != "to"
+            or len(words) == 5 and words[4] != 'reversed'):
+            print 'Syntax:  path from "condition1" to "condition2" [reversed]'
             return
         from_cond = words[1]
         to_cond = words[3]
+        reversed = len(words) == 5
+
+        source = 'parent'
+        dest = 'child'
+
+        if reversed:
+            source, dest = dest, source
 
         # Create the work table.
         self.db.execute("""
@@ -747,7 +783,7 @@ class MemSeeApp(cmd.Cmd):
         # Prime the table with the first set of objects.
         self.db.execute("""
             insert into temp_path (depth, address, path)
-            select 0, address, '' from obj where {}
+            select 0, address, address from obj where {}
             """.format(from_cond)
         )
 
@@ -764,23 +800,75 @@ class MemSeeApp(cmd.Cmd):
             ids = list(ids)
             if ids:
                 # Found something! Get the path and show it.
-                # TODO: show the path from top to bottom.
-                self.show_select("""
-                    select * from obj where address = {}
-                    """.format(ids[0][0])
-                )
-                break
+                path = self.db.fetchone("select path from temp_path where address = ?", (ids[0][0], ))
+                path = path[0].split(' ')
+
+                self.db.execute("drop table if exists tmp_path_order")
+                self.db.execute("create table tmp_path_order (idx int, address int)")
+                self.db.executemany("insert into tmp_path_order (idx, address) values (?, ?)", enumerate(path))
+                self.show_select("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
+                return
 
             # Iterate to the next depth.
-            self.db.execute("""
+            num_searched = self.db.execute("""
                 insert into temp_path (depth, address, path)
-                select depth+1, child, path||" "||address
+                select depth+1, {dest}, path||" "||{dest}
                 from temp_path, ref
                 where depth={depth}
-                and ref.parent = address
-                """.format(depth=depth)
+                and ref.{source} = address
+                and ref.{dest} not in (select address from temp_path)
+                """.format(depth=depth, source=source, dest=dest)
             )
+            print "Added {} paths to newly discovered nodes".format(num_searched)
         #TODO: This won't realize it's finding nothing, and will loop forever.
+
+    @need_db
+    @handle_errors
+    def do_ancestor_types(self, condition):
+        """Display the set of types in each generation of ancestors of the objects selected by `condition`"""
+        condition = self.substitute_symbols(condition)
+        self.db.execute('drop table if exists tmp_ancestor_types')
+        self.db.execute("create table tmp_ancestor_types (address int, type text, gen int, refs int, PRIMARY KEY (address, refs))")
+        gen = 0
+        inserted = self.db.execute("insert into tmp_ancestor_types select address, type, 0, 0 from obj where {}".format(condition))
+
+        while inserted > 0:
+            inserted = self.db.execute(
+                """INSERT INTO tmp_ancestor_types
+                        SELECT DISTINCT r.parent, parent.type, (?1 + 1), r.child
+                          FROM ref r LEFT OUTER JOIN tmp_ancestor_types seen
+                            ON r.parent = seen.address
+                           AND r.child = seen.refs,
+                               obj parent, tmp_ancestor_types child
+                         WHERE r.parent = parent.address
+                           AND r.child = child.address
+                           AND seen.address is NULL
+                           AND child.gen = ?1
+                           AND child.type not in ('module', 'Settings')
+                """,
+                (gen, )
+            )
+            print "Found {} new ancestors".format(inserted)
+            gen += 1
+
+        self.show_select(
+            """SELECT gen, type, count(*)
+                 FROM (
+                     SELECT max(gen) AS gen, type
+                       FROM tmp_ancestor_types
+                   GROUP BY address
+                 )
+             GROUP BY gen, type
+             ORDER BY gen, type
+            """
+        )
+
+
+    @need_db
+    @handle_errors
+    def do_shell(self, line):
+        """Execute a raw sqlite command against the connected database"""
+        self.db.execute(self.substitute_symbols(line))
 
 
 class MemSeeException(Exception):
