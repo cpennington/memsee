@@ -68,8 +68,9 @@ class MemSeeDb(object):
         "create index value{gen} on obj (value);",
         "create index mark{gen} on obj (mark);",
 
-        "create table ref (parent int, child int, PRIMARY KEY (parent, child));",
+        "create table ref (parent int, child int);",
         "create index child{gen} on ref (child);",
+        "create index parent{gen} on ref (parent);",
     ]
     GEN_TABLES = ['obj', 'ref']
 
