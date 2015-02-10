@@ -61,12 +61,13 @@ class MemSeeDb(object):
 
     # Schema for each generation, each is its own set of tables and indexes.
     GEN_SCHEMA = [
-        "create table obj (address int primary key, type text, name text, value text, size int, len int, mark int);",
+        "create table obj (address int primary key, type text, name text, value text, size int, len int, mark int, repr text);",
         "create index size{gen} on obj (size);",
         "create index type{gen} on obj (type);",
         "create index name{gen} on obj (name);",
         "create index value{gen} on obj (value);",
         "create index mark{gen} on obj (mark);",
+        "create index repr{gen} on obj (repr);",
 
         "create table ref (parent int, child int);",
         "create index child{gen} on ref (child);",
@@ -119,20 +120,34 @@ class MemSeeDb(object):
 
         objs = refs = bytes = 0
         c = self.conn.cursor()
+
         for line in data:
             try:
                 objdata = json.loads(line)
             except ValueError:
                 # https://bugs.launchpad.net/meliae/+bug/876810
                 objdata = json.loads(re.sub(r'"value": "(\\"|[^"])*"', '"value": "SURROGATE ERROR REMOVED"', line))
+
+            try:
+                if objdata['type'] in ('function', 'type', 'module'):
+                    objdata['repr'] = objdata.get('name', objdata.get('value', objdata['type']))
+                elif objdata['type'] in ('int', 'str', 'unicode'):
+                    objdata['repr'] = repr(objdata['value'])
+                else:
+                    objdata['repr'] = objdata['type']
+            except:
+                print objdata
+                objdata['repr'] = objdata['type']
+
             c.execute(
-                "insert into obj (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)", (
+                "insert into obj (address, type, name, value, size, len, repr) values (?, ?, ?, ?, ?, ?, ?)", (
                     objdata['address'],
                     objdata['type'],
                     objdata.get('name'),
                     objdata.get('value'),
                     objdata['size'],
                     objdata.get('len'),
+                    objdata['repr']
                 )
             )
             objs += 1
