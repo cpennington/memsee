@@ -18,6 +18,14 @@ import ujson
 
 from grid import GridWriter
 
+from IPython.core.magic import (Magics, magics_class, line_magic,
+                                cell_magic, line_cell_magic)
+
+
+if __name__ == "__main__":
+    print "Memsee is now an IPython magics library. Start ipython notebook with 'ipython notebook', and import memsee"
+    sys.exit(1)
+
 
 # Data is like:
 #
@@ -322,12 +330,13 @@ def handle_errors(fn):
     return _dec
 
 
-class MemSeeApp(cmd.Cmd):
+@magics_class
+class MemSeeApp(Magics):
 
     prompt = "::> "
 
-    def __init__(self):
-        cmd.Cmd.__init__(self)  # cmd.Cmd isn't an object()!
+    def __init__(self, *args, **kwargs):
+        super(MemSeeApp, self).__init__(*args, **kwargs)
         self.db = None
         self.reset()
 
@@ -374,35 +383,8 @@ class MemSeeApp(cmd.Cmd):
         self.env = {}
         self.rev_env = {}
 
-    def install_readline(self):
-        """Set up readline history across invocations."""
-        histfile = os.path.join(os.path.expanduser('~'), '.memsee_history')
-        try:
-            readline.read_history_file(histfile)
-        except IOError:
-            pass
-
-        atexit.register(readline.write_history_file, histfile)
-
-    def main(self, argv):
-        """The main command loop."""
-        self.install_readline()
-        if len(argv) > 1:
-            self.do_open(argv[1])
-        self.cmdloop()
-
-    def emptyline(self):
-        """Override Cmd.emptyline so that empty lines do nothing."""
-        pass
-
-    def default(self, line):
-        if line == "EOF":
-            # Seriously? That's how I find out about the end of input?
-            print
-            return True
-        print "I don't understand %r" % line
-
-    def do_create(self, line):
+    @line_magic
+    def create(self, line):
         """Create a new database: create DBFILE"""
         if not line:
             print "Need a db to create"
@@ -417,7 +399,8 @@ class MemSeeApp(cmd.Cmd):
         self.db.create_schema()
         self.reset()
 
-    def do_open(self, line):
+    @line_magic
+    def open(self, line):
         """Open a database: open DBFILE"""
         if not line:
             print "Need a db to open"
@@ -437,7 +420,8 @@ class MemSeeApp(cmd.Cmd):
             self.rev_env[value] = name
 
     @need_db
-    def do_read(self, line):
+    @line_magic
+    def read(self, line):
         """Read a data file: read DATAFILE
 
         Each file read becomes a new generation in the database.
@@ -476,7 +460,8 @@ class MemSeeApp(cmd.Cmd):
         )
 
     @need_db
-    def do_stats(self, line):
+    @line_magic
+    def stats(self, line):
         """Print object and reference counts, and total size."""
         print "{.both} objects, {.both} references, {.both} total bytes".format(
             Num(self.db.num_objects()),
@@ -485,7 +470,8 @@ class MemSeeApp(cmd.Cmd):
         )
 
     @need_db
-    def do_parents(self, line):
+    @line_magic
+    def parents(self, line):
         """Show parent objects: parents ADDRESS"""
         if not line or not line.isdigit():
             print "Need an address to check for: parents ADDRESS"
@@ -497,7 +483,8 @@ class MemSeeApp(cmd.Cmd):
             print row
 
     @need_db
-    def do_info(self, line):
+    @line_magic
+    def info(self, line):
         """Show info about an object: info ADDRESS"""
         if not line or not line.isdigit():
             print "Need an address to check for: info ADDRESS"
@@ -593,7 +580,8 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_select(self, line):
+    @line_magic
+    def select(self, line):
         """Perform a query against the SQLite db.
 
         If the query has an address column, then rows are labelled like #2.5.
@@ -636,7 +624,8 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_insert(self, line):
+    @line_magic
+    def insert(self, line):
         """Execute a insert statement against the SQLite db.
 
         See the select command for available shorthands.
@@ -647,7 +636,8 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_delete(self, line):
+    @line_magic
+    def delete(self, line):
         """Execute a delete statement against the SQLite db.
 
         See the select command for available shorthands.
@@ -658,14 +648,16 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_pin(self, condition):
+    @line_magic
+    def pin(self, condition):
         """Prevent all objects in obj selected by `condition` from being deleted by `gc`"""
         query = self.substitute_symbols('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
         nrows = self.db.execute(query)
         print "{} rows pinned".format(nrows)
 
     @need_db
-    def do_backup(self, _line):
+    @line_magic
+    def backup(self, _line):
         """Copy the database for safe-keeping.  Only one level."""
         backup = self.db.filename + '.bak'
         if os.path.exists(backup):
@@ -675,7 +667,8 @@ class MemSeeApp(cmd.Cmd):
             shutil.copyfile(self.db.filename, backup)
 
     @need_db
-    def do_restore(self, _line):
+    @line_magic
+    def restore(self, _line):
         """Restore a saved-away database."""
         backup = self.db.filename + '.bak'
         if not os.path.exists(backup):
@@ -686,16 +679,18 @@ class MemSeeApp(cmd.Cmd):
             self.db = MemSeeDb(self.db.filename, sys.stdout)
 
     @need_db
-    def do_gc(self, line):
+    @line_magic
+    def gc(self, line):
         """Delete orphan objects and their references, recursively."""
-        self.do_stats('')
+        self.stats('')
         self.db.execute("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
         num_marked = self.db.execute(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
         print "Marked {} top level objects".format(num_marked)
-        self.do_continue_gc(line)
+        self.continue_gc(line)
 
     @need_db
-    def do_continue_gc(self, line):
+    @line_magic
+    def continue_gc(self, line):
         """Continue a previously interrupted garbage collection"""
 
         depth = self.db.fetchint("select max(mark) from obj")
@@ -725,10 +720,11 @@ class MemSeeApp(cmd.Cmd):
         num_deleted = self.db.execute("DELETE FROM obj WHERE mark IS NULL")
         print "Deleted {} objects".format(num_deleted)
 
-        self.do_stats('')
+        self.stats('')
 
     @need_db
-    def do_gen(self, line):
+    @line_magic
+    def gen(self, line):
         """Examine or switch generations.
 
         Each data file read becomes a new generation.  The current generation
@@ -763,7 +759,8 @@ class MemSeeApp(cmd.Cmd):
             print msg.format(gen=gen, gens=gens)
 
     @need_db
-    def do_set(self, line):
+    @line_magic
+    def set(self, line):
         """Set or examine named values.
 
         "set NAME VALUE" defines a new name.  VALUE can contain other names,
@@ -785,12 +782,14 @@ class MemSeeApp(cmd.Cmd):
             self.db.define_name(name, value)
 
     @handle_errors
-    def do_echo(self, line):
+    @line_magic
+    def echo(self, line):
         """Show the value of an expression."""
         line = self.substitute_symbols(line)
         print line
 
-    def do_width(self, line):
+    @line_magic
+    def width(self, line):
         """Set the widths for columns: WIDTH colname width ..."""
         words = line.split()
         if len(words) % 2 != 0:
@@ -807,7 +806,8 @@ class MemSeeApp(cmd.Cmd):
             align = self.column_formats.get(colname, "<")[0]
             self.column_formats[colname] = "{}{}".format(align, width)
 
-    def do_kids(self, line):
+    @line_magic
+    def kids(self, line):
         """Display object descending from an object."""
         words = self.substitute_symbols(line).split()
         if len(words) != 1:
@@ -837,7 +837,8 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_path(self, line):
+    @line_magic
+    def path(self, line):
         """Find a path from one set of objects to another."""
         words = shlex.split(self.substitute_symbols(line).encode('utf8'))
         if (len(words) not in (4, 5)
@@ -870,7 +871,8 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_ancestor_types(self, condition):
+    @line_magic
+    def ancestor_types(self, condition):
         """Display the set of types in each generation of ancestors of the objects selected by `condition`"""
         condition = self.substitute_symbols(condition)
         self.db.execute('drop table if exists tmp_ancestor_types')
@@ -912,7 +914,8 @@ class MemSeeApp(cmd.Cmd):
 
     @need_db
     @handle_errors
-    def do_shell(self, line):
+    @line_magic
+    def shell(self, line):
         """Execute a raw sqlite command against the connected database"""
         self.db.execute(self.substitute_symbols(line))
 
@@ -923,6 +926,6 @@ class MemSeeException(Exception):
 class SubstitutionError(MemSeeException):
     pass
 
+ip = get_ipython()
+ip.register_magics(MemSeeApp)
 
-if __name__ == "__main__":
-    MemSeeApp().main(sys.argv)
