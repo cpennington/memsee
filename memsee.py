@@ -20,7 +20,7 @@ from grid import GridWriter
 
 from IPython.core.magic import (
     Magics, magics_class, line_magic,
-    cell_magic, line_cell_magic, needs_local_scope
+    cell_magic, line_cell_magic
 )
 
 
@@ -385,9 +385,8 @@ class MemSeeApp(Magics):
         self.env = {}
         self.rev_env = {}
 
-    @needs_local_scope
     @line_magic
-    def create(self, line, local_ns):
+    def create(self, line):
         """Create a new database: create DBFILE"""
         if not line:
             print "Need a db to create"
@@ -398,13 +397,13 @@ class MemSeeApp(Magics):
             return
 
         dbfile = words[0]
-        local_ns['memsee_db'] = self.db = MemSeeDb(dbfile, sys.stdout)
+        self.db = MemSeeDb(dbfile, sys.stdout)
         self.db.create_schema()
         self.reset()
+        self.shell.push({'memsee_db': self.db})
 
         print "Database created, available via variable 'memsee_db'"
 
-    @needs_local_scope
     @line_magic
     def open(self, line, local_ns):
         """Open a database: open DBFILE"""
@@ -417,13 +416,15 @@ class MemSeeApp(Magics):
             return
 
         dbfile = os.path.expanduser(words[0])
-        local_ns['memsee_db'] = self.db = MemSeeDb(dbfile, sys.stdout)
+        self.db = MemSeeDb(dbfile, sys.stdout)
         self.reset()
 
         # Load the defined names
         for name, value in self.db.all_names():
             self.env[name] = value
             self.rev_env[value] = name
+
+        self.shell.push({'memsee_db': self.db})
 
         print "Database opened, available via variable 'memsee_db'"
 
