@@ -5,7 +5,7 @@ import cmd
 import functools
 import gzip
 import itertools
-import json
+import igraph
 import os
 import re
 import readline
@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import ujson
 
 from grid import GridWriter
 
@@ -61,21 +62,84 @@ class MemSeeDb(object):
 
     # Schema for each generation, each is its own set of tables and indexes.
     GEN_SCHEMA = [
-        "create table obj (address int primary key, type text, name text, value text, size int, len int, mark int);",
+        "create table obj (address int primary key, type text, name text, value text, size int, len int, mark int, repr text);",
         "create index size{gen} on obj (size);",
         "create index type{gen} on obj (type);",
         "create index name{gen} on obj (name);",
         "create index value{gen} on obj (value);",
         "create index mark{gen} on obj (mark);",
+        "create index repr{gen} on obj (repr);",
 
-        "create table ref (parent int, child int, PRIMARY KEY (parent, child));",
+        "create table ref (parent int, child int);",
         "create index child{gen} on ref (child);",
+        "create index parent{gen} on ref (parent);",
     ]
     GEN_TABLES = ['obj', 'ref']
 
-    def __init__(self, filename):
+    def __init__(self, filename, out=None):
         self.filename = filename
         self.conn = sqlite3.connect(filename)
+        self.graphs = {}
+        self.out = out
+
+    @property
+    def graph(self):
+        if self.gen not in self.graphs:
+            self._load_graph(self.gen)
+
+        return self.graphs[self.gen]
+
+    @property
+    def gen(self):
+        return self.fetchint("select num from gen where current = 1")
+
+    def _load_graph(self, gen):
+        if self.out:
+            self.out.write("Loading object graph for generation {}\n".format(gen))
+            self.out.flush()
+
+        # Store the current generation
+        current_gen = self.gen
+
+        # Activate the target generation
+        self.switch_to_generation(gen)
+
+        graph = igraph.Graph(directed=True)
+
+        if self.out:
+            self.out.write("Loading {} objects... ".format(self.fetchint("select count(*) from obj")))
+            self.out.flush()
+
+        start = time.time()
+        # Add all object addresses as vertex names
+        graph.add_vertices(row[0] for row in self.fetchall("select cast(address as text) from obj"))
+
+        if self.out:
+            self.out.write("Done ({} secs)\n".format(time.time() - start))
+            self.out.flush()
+
+        if self.out:
+            self.out.write("Loading {} edges... ".format(self.fetchint("select count(*) from ref")))
+            self.out.flush()
+
+        start = time.time()
+
+        # Add all of the edges
+        graph.add_edges(self.fetchall("""
+            SELECT cast(parent as text), cast(child as text)
+            FROM ref
+            INNER JOIN obj AS obj_parent ON ref.parent = obj_parent.address
+            INNER JOIN obj AS obj_child ON ref.child = obj_child.address
+        """))
+
+        if self.out:
+            self.out.write("Done ({} secs)\n".format(time.time() - start))
+            self.out.flush()
+
+        self.graphs[gen] = graph
+
+        # Switch back to the previous active generation
+        self.switch_to_generation(current_gen)
 
     def create_schema(self):
         c = self.conn.cursor()
@@ -84,7 +148,7 @@ class MemSeeDb(object):
         self.conn.commit()
 
     def switch_to_generation(self, newgen):
-        oldgen = self.fetchint("select num from gen where current = 1")
+        oldgen = self.gen
         if oldgen is not None:
             for table in self.GEN_TABLES:
                 self.execute("alter table {table} rename to {table}{gen}".format(table=table, gen=oldgen))
@@ -104,7 +168,27 @@ class MemSeeDb(object):
         for stmt in self.GEN_SCHEMA:
             self.execute(stmt.format(gen=gen))
 
-    def import_data(self, data, out=None):
+    def _parse_data(self, data):
+        for line in data:
+            try:
+                objdata = ujson.loads(line)
+            except ValueError:
+                # https://bugs.launchpad.net/meliae/+bug/876810
+                objdata = ujson.loads(re.sub(r'"value": "(\\"|[^"])*"', '"value": "SURROGATE ERROR REMOVED"', line))
+
+            try:
+                if objdata['type'] in ('function', 'type', 'module'):
+                    objdata['repr'] = objdata.get('name', objdata.get('value', objdata['type']))
+                elif objdata['type'] in ('int', 'str', 'unicode'):
+                    objdata['repr'] = repr(objdata['value'])
+                else:
+                    objdata['repr'] = objdata['type']
+            except:
+                print objdata
+                objdata['repr'] = objdata['type']
+            yield objdata
+
+    def import_data(self, data):
         # Put away the current generation tables.
         self.switch_to_generation(None)
 
@@ -112,26 +196,24 @@ class MemSeeDb(object):
         self.make_new_generation()
 
         # Read the data.
-        if out:
-            out.write("Reading")
-            out.flush()
+        if self.out:
+            self.out.write("Reading")
+            self.out.flush()
 
         objs = refs = bytes = 0
         c = self.conn.cursor()
-        for line in data:
-            try:
-                objdata = json.loads(line)
-            except ValueError:
-                # https://bugs.launchpad.net/meliae/+bug/876810
-                objdata = json.loads(re.sub(r'"value": "(\\"|[^"])*"', '"value": "SURROGATE ERROR REMOVED"', line))
+
+        for objdata in self._parse_data(data):
+
             c.execute(
-                "insert into obj (address, type, name, value, size, len) values (?, ?, ?, ?, ?, ?)", (
+                "insert into obj (address, type, name, value, size, len, repr) values (?, ?, ?, ?, ?, ?, ?)", (
                     objdata['address'],
                     objdata['type'],
                     objdata.get('name'),
                     objdata.get('value'),
                     objdata['size'],
                     objdata.get('len'),
+                    objdata['repr']
                 )
             )
             objs += 1
@@ -144,13 +226,13 @@ class MemSeeDb(object):
                 refs += 1
             if objs % 10000 == 0:
                 self.conn.commit()
-                if out:
-                    out.write(".")
-                    out.flush()
+                if self.out:
+                    self.out.write(".")
+                    self.out.flush()
 
         self.conn.commit()
-        if out:
-            out.write("\n")
+        if self.out:
+            self.out.write("\n")
 
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
 
@@ -331,7 +413,7 @@ class MemSeeApp(cmd.Cmd):
             return
 
         dbfile = words[0]
-        self.db = MemSeeDb(dbfile)
+        self.db = MemSeeDb(dbfile, sys.stdout)
         self.db.create_schema()
         self.reset()
 
@@ -346,7 +428,7 @@ class MemSeeApp(cmd.Cmd):
             return
 
         dbfile = os.path.expanduser(words[0])
-        self.db = MemSeeDb(dbfile)
+        self.db = MemSeeDb(dbfile, sys.stdout)
         self.reset()
 
         # Load the defined names
@@ -377,10 +459,11 @@ class MemSeeApp(cmd.Cmd):
 
         start = time.time()
         with opener(filename) as data:
-            stats = self.db.import_data(data, sys.stdout)
+            stats = self.db.import_data(data)
 
         sys.stdout.write("Marking top objects...")
         sys.stdout.flush()
+        self.db.execute("INSERT INTO obj (address) VALUES (0)")
         n = self.db.execute("insert into ref (parent, child) select 0, address from obj where address not in (select child from ref);")
         print " {}".format(n)
 
@@ -600,7 +683,7 @@ class MemSeeApp(cmd.Cmd):
             return
         else:
             shutil.copyfile(backup, self.db.filename)
-            self.db = MemSeeDb(self.db.filename)
+            self.db = MemSeeDb(self.db.filename, sys.stdout)
 
     @need_db
     def do_gc(self, line):
@@ -767,60 +850,23 @@ class MemSeeApp(cmd.Cmd):
         to_cond = words[3]
         reversed = len(words) == 5
 
-        source = 'parent'
-        dest = 'child'
+        from_address = self.db.fetchone("SELECT cast(address as text) FROM obj WHERE {}".format(from_cond))
+        to_addresses = (row[0] for row in self.db.fetchall("SELECT cast(address as text) FROM obj WHERE {}".format(to_cond)))
 
-        if reversed:
-            source, dest = dest, source
-
-        # Create the work table.
-        self.db.execute("""
-            create table if not exists
-            temp_path (depth int, address int, path text)
-            """)
-        self.db.execute("""delete from temp_path""")
-
-        # Prime the table with the first set of objects.
-        self.db.execute("""
-            insert into temp_path (depth, address, path)
-            select 0, address, address from obj where {}
-            """.format(from_cond)
+        paths = self.db.graph.get_shortest_paths(
+            v=from_address[0],
+            to=to_addresses,
+            mode=igraph.IN if reversed else igraph.OUT,
+            output='vpath',
         )
 
-        # Loop down the children looking for the to_cond condition.
-        for depth in itertools.count():
-            # Check if the current generation meets the ending condition.
-            ids = self.db.fetchall("""
-                select address from obj
-                where address in (select address from temp_path where depth = {depth})
-                and ({to_cond})
-                limit 1
-                """.format(depth=depth, to_cond=to_cond)
-            )
-            ids = list(ids)
-            if ids:
-                # Found something! Get the path and show it.
-                path = self.db.fetchone("select path from temp_path where address = ?", (ids[0][0], ))
-                path = path[0].split(' ')
+        for path in paths:
+            addresses = self.db.graph.vs.select(path)['name']
 
-                self.db.execute("drop table if exists tmp_path_order")
-                self.db.execute("create table tmp_path_order (idx int, address int)")
-                self.db.executemany("insert into tmp_path_order (idx, address) values (?, ?)", enumerate(path))
-                self.show_select("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
-                return
-
-            # Iterate to the next depth.
-            num_searched = self.db.execute("""
-                insert into temp_path (depth, address, path)
-                select depth+1, {dest}, path||" "||{dest}
-                from temp_path, ref
-                where depth={depth}
-                and ref.{source} = address
-                and ref.{dest} not in (select address from temp_path)
-                """.format(depth=depth, source=source, dest=dest)
-            )
-            print "Added {} paths to newly discovered nodes".format(num_searched)
-        #TODO: This won't realize it's finding nothing, and will loop forever.
+            self.db.execute("drop table if exists tmp_path_order")
+            self.db.execute("create temp table tmp_path_order (idx int, address int)")
+            self.db.executemany("insert into tmp_path_order (idx, address) values (?, ?)", enumerate(addresses))
+            self.show_select("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
 
     @need_db
     @handle_errors
