@@ -1,14 +1,10 @@
 #!/usr/bin/env python
 
-import atexit
-import cmd
 import functools
 import gzip
-import itertools
 import igraph
 import os
 import re
-import readline
 import shlex
 import shutil
 import sqlite3
