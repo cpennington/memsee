@@ -935,6 +935,6 @@ class MemSeeException(Exception):
 class SubstitutionError(MemSeeException):
     pass
 
-ip = get_ipython()
-ip.register_magics(MemSeeApp)
+def load_ipython_extension(ipython):
+    ipython.register_magics(MemSeeApp)
 
