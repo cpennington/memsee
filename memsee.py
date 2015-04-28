@@ -1,5 +1,11 @@
 #!/usr/bin/env python
 
+from __future__ import division
+from __future__ import print_function
+from builtins import str
+from builtins import range
+from builtins import object
+from past.utils import old_div
 import functools
 import gzip
 import igraph
@@ -29,7 +35,7 @@ from sql.run import ResultSet
 
 
 if __name__ == "__main__":
-    print "Memsee is now an IPython magics library. Start ipython notebook with 'ipython notebook', and import memsee"
+    print("Memsee is now an IPython magics library. Start ipython notebook with 'ipython notebook', and import memsee")
     sys.exit(1)
 
 
@@ -72,7 +78,7 @@ def need_db(fn):
     @functools.wraps(fn)
     def _dec(self, *args, **kwargs):
         if not Connection.get(None):
-            print "Need an open database"
+            print("Need an open database")
             return
         return fn(self, *args, **kwargs)
     return _dec
@@ -84,9 +90,9 @@ def handle_errors(fn):
         try:
             return fn(self, *args, **kwargs)
         except sqlite3.Error as e:
-            print "*** SQL error: {}".format(e)
+            print("*** SQL error: {}".format(e))
         except MemSeeException as e:
-            print "*** {}".format(e)
+            print("*** {}".format(e))
     return _dec
 
 
@@ -135,7 +141,7 @@ class MemSeeApp(SqlMagic):
         return self.fetchint("select num from gen where current = 1")
 
     def _load_graph(self, gen):
-        print "Loading object graph for generation {}\n".format(gen)
+        print("Loading object graph for generation {}\n".format(gen))
 
         # Store the current generation
         current_gen = self.current_gen
@@ -145,15 +151,15 @@ class MemSeeApp(SqlMagic):
 
         graph = igraph.Graph(directed=True)
 
-        print "Loading {} objects... ".format(self.fetchint("select count(*) from obj"))
+        print("Loading {} objects... ".format(self.fetchint("select count(*) from obj")))
 
         start = time.time()
         # Add all object addresses as vertex names
         graph.add_vertices(row[0] for row in self.fetchall("select cast(address as text) from obj"))
 
-        print "Done ({} secs)\n".format(time.time() - start)
+        print("Done ({} secs)\n".format(time.time() - start))
 
-        print "Loading {} edges... ".format(self.fetchint("select count(*) from ref"))
+        print("Loading {} edges... ".format(self.fetchint("select count(*) from ref")))
 
         start = time.time()
 
@@ -165,7 +171,7 @@ class MemSeeApp(SqlMagic):
             INNER JOIN obj AS obj_child ON ref.child = obj_child.address
         """))
 
-        print "Done ({} secs)\n".format(time.time() - start)
+        print("Done ({} secs)\n".format(time.time() - start))
 
         self.graphs[gen] = graph
 
@@ -212,7 +218,7 @@ class MemSeeApp(SqlMagic):
                 else:
                     objdata['repr'] = objdata['type']
             except:
-                print objdata
+                print(objdata)
                 objdata['repr'] = objdata['type']
             yield objdata
 
@@ -224,7 +230,7 @@ class MemSeeApp(SqlMagic):
         self.make_new_generation()
 
         # Read the data.
-        print "Reading"
+        print("Reading")
 
         objs = refs = bytes = 0
 
@@ -260,10 +266,10 @@ class MemSeeApp(SqlMagic):
             if objs % 10000 == 0:
                 transaction.commit()
                 transaction = sql_alch_conn.begin()
-                print "loaded {} objects, {} refs".format(objs, refs)
+                print("loaded {} objects, {} refs".format(objs, refs))
 
         self.execute_and_ignore('COMMIT')
-        print ""
+        print("")
 
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
 
@@ -284,14 +290,14 @@ class MemSeeApp(SqlMagic):
 
     def execute(self, line, cell='', local_ns={}):
         if self.debug:
-            print line
-            print cell
+            print(line)
+            print(cell)
             if local_ns:
-                print local_ns
+                print(local_ns)
             start = time.time()
         result = super(MemSeeApp, self).execute(line=line, cell=cell, local_ns=local_ns)
         if self.debug:
-            print "({:.2f}s)".format(time.time() - start)
+            print("({:.2f}s)".format(time.time() - start))
         return result
 
     def fetchone(self, query, args={}):
@@ -337,13 +343,13 @@ class MemSeeApp(SqlMagic):
     def debug(self, line):
         """Toggle Debug Mode"""
         self.debug = not self.debug
-        print "DEBUG MODE", "ON" if self.debug else "OFF"
+        print("DEBUG MODE", "ON" if self.debug else "OFF")
 
     @line_magic
     def create(self, line):
         """Create a new database: create DBFILE"""
         if not line:
-            print "Need a db to create"
+            print("Need a db to create")
             return
         words = line.split()
         if len(words) > 1:
@@ -356,13 +362,13 @@ class MemSeeApp(SqlMagic):
         self.reset()
         self.shell.push({'memsee': self})
 
-        print "Database created, available via variable 'memsee'"
+        print("Database created, available via variable 'memsee'")
 
     @line_magic
     def open(self, line):
         """Open a database: open DBFILE"""
         if not line:
-            print "Need a db to open"
+            print("Need a db to open")
             return
         words = line.split()
         if len(words) > 1:
@@ -379,7 +385,7 @@ class MemSeeApp(SqlMagic):
             self.rev_env[value] = name
         self.shell.push({'memsee': self})
 
-        print "Database opened, available via variable 'memsee'"
+        print("Database opened, available via variable 'memsee'")
 
     @need_db
     @line_magic
@@ -391,7 +397,7 @@ class MemSeeApp(SqlMagic):
 
         """
         if not line:
-            print "Need a file to read"
+            print("Need a file to read")
             return
         words = line.split()
         if len(words) > 1:
@@ -411,50 +417,50 @@ class MemSeeApp(SqlMagic):
         sys.stdout.flush()
         self.execute_and_ignore("INSERT INTO obj (address) VALUES (0)")
         n = self.execute_and_ignore("insert into ref (parent, child) select 0, address from obj where address not in (select child from ref);")
-        print " {}".format(n)
+        print(" {}".format(n))
 
         end = time.time()
-        print "{.both} objects and {.both} references totalling {.both} bytes ({:.1f}s)".format(
+        print("{.both} objects and {.both} references totalling {.both} bytes ({:.1f}s)".format(
             Num(stats['objs']),
             Num(stats['refs']),
             Num(stats['bytes']),
             end - start,
-        )
+        ))
 
     @need_db
     @line_magic
     def stats(self, line):
         """Print object and reference counts, and total size."""
-        print "{.both} objects, {.both} references, {.both} total bytes".format(
+        print("{.both} objects, {.both} references, {.both} total bytes".format(
             Num(self.num_objects()),
             Num(self.num_refs()),
             Num(self.total_bytes()),
-        )
+        ))
 
     @need_db
     @line_magic
     def parents(self, line):
         """Show parent objects: parents ADDRESS"""
         if not line or not line.isdigit():
-            print "Need an address to check for: parents ADDRESS"
+            print("Need an address to check for: parents ADDRESS")
             return
 
         address = int(line)
         query = "select address, type, name, value, size, len from obj, ref where obj.address = ref.parent and ref.child = :child"
         for row in self.fetchall(query, child=address):
-            print row
+            print(row)
 
     @need_db
     @line_magic
     def info(self, line):
         """Show info about an object: info ADDRESS"""
         if not line or not line.isdigit():
-            print "Need an address to check for: info ADDRESS"
+            print("Need an address to check for: info ADDRESS")
             return
 
         address = int(line)
         query = "select * from obj, ref where obj.address = :addr"
-        print self.fetchone(query, addr=address)
+        print(self.fetchone(query, addr=address))
 
     def substitute_symbols(self, sql):
         """Replace tokens in `sql`."""
@@ -522,7 +528,7 @@ class MemSeeApp(SqlMagic):
         """Fix cell data for good presentation."""
         if c is None:
             c = u"\N{RING OPERATOR}"
-        if isinstance(c, (int, long)):
+        if isinstance(c, int):
             if str(c) in self.rev_env:
                 c = "$" + self.rev_env[str(c)]
             return c
@@ -553,7 +559,7 @@ class MemSeeApp(SqlMagic):
         num_results = len(self.results)
         width = int(math.ceil(math.log10(len(results))))
         fmt_str = "#{{result}}.{{row:0>{width}}}".format(width=width)
-        index = Series(fmt_str.format(result=num_results, row=row) for row in xrange(len(results)))
+        index = Series(fmt_str.format(result=num_results, row=row) for row in range(len(results)))
 
         results.insert(0, '#', index)
         results = results.set_index('#')
@@ -574,7 +580,7 @@ class MemSeeApp(SqlMagic):
         """
         query = self.substitute_symbols("insert " + line)
         nrows = self.execute_and_ignore(query)
-        print "{} rows inserted".format(nrows)
+        print("{} rows inserted".format(nrows))
 
     @need_db
     @handle_errors
@@ -586,7 +592,7 @@ class MemSeeApp(SqlMagic):
         """
         query = self.substitute_symbols("delete " + line)
         nrows = self.execute_and_ignore(query)
-        print "{} rows deleted".format(nrows)
+        print("{} rows deleted".format(nrows))
 
     @need_db
     @handle_errors
@@ -595,7 +601,7 @@ class MemSeeApp(SqlMagic):
         """Prevent all objects in obj selected by `condition` from being deleted by `gc`"""
         query = self.substitute_symbols('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
         nrows = self.execute_and_ignore(query)
-        print "{} rows pinned".format(nrows)
+        print("{} rows pinned".format(nrows))
 
     @need_db
     @line_magic
@@ -603,7 +609,7 @@ class MemSeeApp(SqlMagic):
         """Copy the database for safe-keeping.  Only one level."""
         backup = self.filename + '.bak'
         if os.path.exists(backup):
-            print "DB already backed up"
+            print("DB already backed up")
             return
         else:
             shutil.copyfile(self.filename, backup)
@@ -614,7 +620,7 @@ class MemSeeApp(SqlMagic):
         """Restore a saved-away database."""
         backup = self.filename + '.bak'
         if not os.path.exists(backup):
-            print "No backed up DB"
+            print("No backed up DB")
             return
         else:
             shutil.copyfile(backup, self.filename)
@@ -627,7 +633,7 @@ class MemSeeApp(SqlMagic):
         self.stats('')
         self.execute_and_ignore("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
         num_marked = self.execute_and_ignore(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
-        print "Marked {} top level objects".format(num_marked)
+        print("Marked {} top level objects".format(num_marked))
         self.continue_gc(line)
 
     @need_db
@@ -654,14 +660,14 @@ class MemSeeApp(SqlMagic):
             )
 
             if num_marked == 0:
-                print "Marking complete"
+                print("Marking complete")
                 break
 
-            print "Marked {} objects at depth {}".format(num_marked, depth)
+            print("Marked {} objects at depth {}".format(num_marked, depth))
             depth += 1
 
         num_deleted = self.execute_and_ignore("DELETE FROM obj WHERE mark IS NULL")
-        print "Deleted {} objects".format(num_deleted)
+        print("Deleted {} objects".format(num_deleted))
 
         self.stats('')
 
@@ -683,7 +689,7 @@ class MemSeeApp(SqlMagic):
         gens = self.fetchint("select count(*) from gen")
         if not words:
             gen = self.fetchint("select num from gen where current=1")
-            print "{} generations, current is {}".format(gens, gen or "-none-")
+            print("{} generations, current is {}".format(gens, gen or "-none-"))
         else:
             if words[0] == "none":
                 gen = None
@@ -692,14 +698,14 @@ class MemSeeApp(SqlMagic):
                 try:
                     gen = int(words[0])
                 except ValueError:
-                    print "** Didn't understand {!r} as a generation".format(words[0])
+                    print("** Didn't understand {!r} as a generation".format(words[0]))
                     return
                 if not (0 < gen <= gens):
-                    print "** Not a valid generation number: {}".format(gen)
+                    print("** Not a valid generation number: {}".format(gen))
                     return
                 msg = "Using generation {gen} of {gens}"
             self.switch_to_generation(gen)
-            print msg.format(gen=gen, gens=gens)
+            print(msg.format(gen=gen, gens=gens))
 
     @need_db
     @line_magic
@@ -729,14 +735,14 @@ class MemSeeApp(SqlMagic):
     def echo(self, line):
         """Show the value of an expression."""
         line = self.substitute_symbols(line)
-        print line
+        print(line)
 
     @line_magic
     def kids(self, line):
         """Display object descending from an object."""
         words = self.substitute_symbols(line).split()
         if len(words) != 1:
-            print "Need an object address."
+            print("Need an object address.")
             return
         id = int(words[0])
         self.display_fancy("select * from obj where address = :addr", addr=id)
@@ -747,7 +753,7 @@ class MemSeeApp(SqlMagic):
             ids_shown.update(ids_to_show)
             id_list = ",".join(str(i) for i in ids_to_show)
 
-            print
+            print()
             children = self.display_fancy("""
                 select
                     obj.*,
@@ -770,7 +776,7 @@ class MemSeeApp(SqlMagic):
             or words[0] != "from"
             or words[2] != "to"
             or len(words) == 5 and words[4] != 'reversed'):
-            print 'Syntax:  path from "condition1" to "condition2" [reversed]'
+            print('Syntax:  path from "condition1" to "condition2" [reversed]')
             return
         from_cond = words[1]
         to_cond = words[3]
@@ -824,7 +830,7 @@ class MemSeeApp(SqlMagic):
                 """,
                 gen=gen
             )
-            print "Found {} new ancestors".format(inserted)
+            print("Found {} new ancestors".format(inserted))
             gen += 1
 
         self.display_fancy(
