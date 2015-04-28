@@ -119,38 +119,9 @@ class MemSeeApp(SqlMagic):
 
     def __init__(self, *args, **kwargs):
         super(MemSeeApp, self).__init__(*args, **kwargs)
-
-        self.column_formats = {
-            '#': '<8',
-
-            # obj columns
-            'address': '>16',
-            'type': '<20',
-            'name': '<20',
-            'value': '<60',
-            'size': '>10',
-            'len': '>10',
-
-            # ref columns
-            'parent': '>15',
-            'child': '>15',
-
-            # temp_path columns
-            'path': '<80',
-
-            # ad-hoc columns
-            'count(*)': '>10',
-            'num': '>10',
-            'refs': '>10',
-            'n': '>10',
-        }
-
         self.graphs = {}
-
         self.reset()
-
         self.debug = False
-
 
     @property
     def graph(self):
