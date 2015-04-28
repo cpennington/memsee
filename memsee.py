@@ -202,10 +202,7 @@ class MemSeeApp(SqlMagic):
         self.switch_to_generation(current_gen)
 
     def create_schema(self):
-        c = self.conn.cursor()
-        for stmt in self.SCHEMA:
-            c.execute(stmt)
-        self.conn.commit()
+        self.execute(line='', cell='\n'.join(self.SCHEMA))
 
     def switch_to_generation(self, newgen):
         oldgen = self.current_gen
@@ -259,11 +256,14 @@ class MemSeeApp(SqlMagic):
         print "Reading"
 
         objs = refs = bytes = 0
-        c = self.conn.cursor()
+
+        sql_alch_conn = Connection.get(None).session
+
+        transaction = sql_alch_conn.begin()
 
         for objdata in self._parse_data(data):
 
-            c.execute(
+            sql_alch_conn.execute(
                 """insert into obj
                         (address, type, name, value, size, len, repr)
                    values
@@ -280,17 +280,18 @@ class MemSeeApp(SqlMagic):
             objs += 1
             bytes += objdata['size']
             for ref in objdata['refs']:
-                c.execute(
+                sql_alch_conn.execute(
                     "insert into ref (parent, child) values (:parent, :child)",
                     parent=objdata['address'],
                     child=ref,
                 )
                 refs += 1
             if objs % 10000 == 0:
-                self.conn.commit()
-                print ".",
+                transaction.commit()
+                transaction = sql_alch_conn.begin()
+                print "loaded {} objects, {} refs".format(objs, refs)
 
-        self.conn.commit()
+        self.execute_and_ignore('COMMIT')
         print ""
 
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
@@ -298,7 +299,10 @@ class MemSeeApp(SqlMagic):
     def execute_and_ignore(self, query, **kwargs):
         """For running SQL that makes changes, and doesn't expect results."""
         result = self.execute(query, local_ns=kwargs)
-        return len(result)
+        if result:
+            return len(result)
+        else:
+            return None
 
     def executemany(self, query, arglist=()):
         """Execute a SQL query many times over a list of arguments."""
@@ -310,10 +314,11 @@ class MemSeeApp(SqlMagic):
     def execute(self, line, cell='', local_ns={}):
         if self.debug:
             print line
+            print cell
             if local_ns:
                 print local_ns
             start = time.time()
-        result = super(MemSeeApp, self).execute(line=line, local_ns=local_ns)
+        result = super(MemSeeApp, self).execute(line=line, cell=cell, local_ns=local_ns)
         if self.debug:
             print "({:.2f}s)".format(time.time() - start)
         return result
@@ -374,8 +379,8 @@ class MemSeeApp(SqlMagic):
             self.default(line)
             return
 
-        dbfile = words[0]
-        self.db = MemSeeDb(dbfile, sys.stdout)
+        self.filename = words[0]
+        self.execute("sqlite:///{}".format(self.filename))
         self.create_schema()
         self.reset()
         self.shell.push({'memsee': self})
