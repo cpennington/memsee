@@ -1,5 +1,7 @@
 # Nothing needed!
 
-python-igraph >=0.7, <0.8
+ipython-sql==0.3.4  # This version doesn't have any problems w/ sqlite, unlike 0.3.5
 ipython[all]
+python-igraph >=0.7, <0.8
+git+https://github.com/quantopian/qgrid
 ujson

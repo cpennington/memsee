@@ -3,7 +3,9 @@
 import functools
 import gzip
 import igraph
+import math
 import os
+import qgrid
 import re
 import shlex
 import shutil
@@ -13,11 +15,17 @@ import time
 import ujson
 
 from grid import GridWriter
-
 from IPython.core.magic import (
     Magics, magics_class, line_magic,
     cell_magic, line_cell_magic
 )
+from IPython.utils.traitlets import Bool
+from pandas import Series
+from sql.connection import Connection
+from sql.magic import SqlMagic, load_ipython_extension as sql_load_ipython_extension
+from sql.run import ResultSet
+
+
 
 
 if __name__ == "__main__":
@@ -59,7 +67,32 @@ class Num(object):
             return "{0}".format(self)
 
 
-class MemSeeDb(object):
+def need_db(fn):
+    """Decorator for command handlers that need an open database."""
+    @functools.wraps(fn)
+    def _dec(self, *args, **kwargs):
+        if not Connection.get(None):
+            print "Need an open database"
+            return
+        return fn(self, *args, **kwargs)
+    return _dec
+
+def handle_errors(fn):
+    """Decorator for command handlers that accept user SQL, to handle errors."""
+    @functools.wraps(fn)
+    def _dec(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except sqlite3.Error as e:
+            print "*** SQL error: {}".format(e)
+        except MemSeeException as e:
+            print "*** {}".format(e)
+    return _dec
+
+
+@magics_class
+class MemSeeApp(SqlMagic):
+
     # Fixed schema for the database.
     SCHEMA = [
         "create table gen (num int, current int);",
@@ -82,51 +115,74 @@ class MemSeeDb(object):
     ]
     GEN_TABLES = ['obj', 'ref']
 
-    def __init__(self, filename, out=None):
-        self.filename = filename
-        self.conn = sqlite3.connect(filename)
+    feedback = Bool(False, config=True, help="Print number of rows affected by DML")
+
+    def __init__(self, *args, **kwargs):
+        super(MemSeeApp, self).__init__(*args, **kwargs)
+
+        self.column_formats = {
+            '#': '<8',
+
+            # obj columns
+            'address': '>16',
+            'type': '<20',
+            'name': '<20',
+            'value': '<60',
+            'size': '>10',
+            'len': '>10',
+
+            # ref columns
+            'parent': '>15',
+            'child': '>15',
+
+            # temp_path columns
+            'path': '<80',
+
+            # ad-hoc columns
+            'count(*)': '>10',
+            'num': '>10',
+            'refs': '>10',
+            'n': '>10',
+        }
+
         self.graphs = {}
-        self.out = out
+
+        self.reset()
+
+        self.debug = False
+
 
     @property
     def graph(self):
-        if self.gen not in self.graphs:
-            self._load_graph(self.gen)
+        if self.current_gen not in self.graphs:
+            self._load_graph(self.current_gen)
 
-        return self.graphs[self.gen]
+        return self.graphs[self.current_gen]
 
     @property
-    def gen(self):
+    def current_gen(self):
         return self.fetchint("select num from gen where current = 1")
 
     def _load_graph(self, gen):
-        if self.out:
-            self.out.write("Loading object graph for generation {}\n".format(gen))
-            self.out.flush()
+        print "Loading object graph for generation {}\n".format(gen)
 
         # Store the current generation
-        current_gen = self.gen
+        current_gen = self.current_gen
 
         # Activate the target generation
         self.switch_to_generation(gen)
 
         graph = igraph.Graph(directed=True)
 
-        if self.out:
-            self.out.write("Loading {} objects... ".format(self.fetchint("select count(*) from obj")))
-            self.out.flush()
+        print "Loading {} objects... ".format(self.fetchint("select count(*) from obj"))
 
         start = time.time()
         # Add all object addresses as vertex names
         graph.add_vertices(row[0] for row in self.fetchall("select cast(address as text) from obj"))
 
-        if self.out:
-            self.out.write("Done ({} secs)\n".format(time.time() - start))
-            self.out.flush()
+        print "Done ({} secs)\n".format(time.time() - start)
 
-        if self.out:
-            self.out.write("Loading {} edges... ".format(self.fetchint("select count(*) from ref")))
-            self.out.flush()
+        print "Loading {} edges... ".format(self.fetchint("select count(*) from ref"))
 
         start = time.time()
 
@@ -138,9 +194,7 @@ class MemSeeDb(object):
             INNER JOIN obj AS obj_child ON ref.child = obj_child.address
         """))
 
-        if self.out:
-            self.out.write("Done ({} secs)\n".format(time.time() - start))
-            self.out.flush()
+        print "Done ({} secs)\n".format(time.time() - start)
 
         self.graphs[gen] = graph
 
@@ -154,25 +208,25 @@ class MemSeeDb(object):
         self.conn.commit()
 
     def switch_to_generation(self, newgen):
-        oldgen = self.gen
+        oldgen = self.current_gen
         if oldgen is not None:
             for table in self.GEN_TABLES:
-                self.execute("alter table {table} rename to {table}{gen}".format(table=table, gen=oldgen))
-        self.execute("update gen set current=0")
+                self.execute_and_ignore("alter table {table} rename to {table}{gen}".format(table=table, gen=oldgen))
+        self.execute_and_ignore("update gen set current=0")
         if newgen:
             for table in self.GEN_TABLES:
-                self.execute("alter table {table}{gen} rename to {table}".format(table=table, gen=newgen))
-            self.execute("update gen set current=1 where num=?", (newgen,))
+                self.execute_and_ignore("alter table {table}{gen} rename to {table}".format(table=table, gen=newgen))
+            self.execute_and_ignore("update gen set current=1 where num=:gen", gen=newgen)
 
     def make_new_generation(self):
         gen = self.fetchint("select max(num) from gen", default=0)
         gen += 1
-        self.execute(
-            "insert into gen (num, current) values (?, 1)",
-            (gen,)
+        self.execute_and_ignore(
+            "insert into gen (num, current) values (:gen, 1)",
+            gen=gen
         )
         for stmt in self.GEN_SCHEMA:
-            self.execute(stmt.format(gen=gen))
+            self.execute_and_ignore(stmt.format(gen=gen))
 
     def _parse_data(self, data):
         for line in data:
@@ -202,9 +256,7 @@ class MemSeeDb(object):
         self.make_new_generation()
 
         # Read the data.
-        if self.out:
-            self.out.write("Reading")
-            self.out.flush()
+        print "Reading"
 
         objs = refs = bytes = 0
         c = self.conn.cursor()
@@ -212,76 +264,68 @@ class MemSeeDb(object):
         for objdata in self._parse_data(data):
 
             c.execute(
-                "insert into obj (address, type, name, value, size, len, repr) values (?, ?, ?, ?, ?, ?, ?)", (
-                    objdata['address'],
-                    objdata['type'],
-                    objdata.get('name'),
-                    objdata.get('value'),
-                    objdata['size'],
-                    objdata.get('len'),
-                    objdata['repr']
-                )
+                """insert into obj
+                        (address, type, name, value, size, len, repr)
+                   values
+                        (:address, :type, :name, :value, :size, :len, :repr)
+                """,
+                address=objdata['address'],
+                type=objdata['type'],
+                name=objdata.get('name'),
+                value=objdata.get('value'),
+                size=objdata['size'],
+                len=objdata.get('len'),
+                repr=objdata['repr']
             )
             objs += 1
             bytes += objdata['size']
             for ref in objdata['refs']:
                 c.execute(
-                    "insert into ref (parent, child) values (?, ?)",
-                    (objdata['address'], ref)
+                    "insert into ref (parent, child) values (:parent, :child)",
+                    parent=objdata['address'],
+                    child=ref,
                 )
                 refs += 1
             if objs % 10000 == 0:
                 self.conn.commit()
-                if self.out:
-                    self.out.write(".")
-                    self.out.flush()
+                print ".",
 
         self.conn.commit()
-        if self.out:
-            self.out.write("\n")
+        print ""
 
         return {'objs': objs, 'refs': refs, 'bytes': bytes}
 
-    def execute(self, query, args=()):
+    def execute_and_ignore(self, query, **kwargs):
         """For running SQL that makes changes, and doesn't expect results."""
-        c = self.conn.cursor()
-        self.do_execute(c, query, args)
-        self.conn.commit()
-        return c.rowcount
+        result = self.execute(query, local_ns=kwargs)
+        return len(result)
 
     def executemany(self, query, arglist=()):
         """Execute a SQL query many times over a list of arguments."""
-        c = self.conn.cursor()
-        c.executemany(query, arglist)
-        self.conn.commit()
-        return c.rowcount
+        return sum(len(self.execute(query, args)) for args in arglist)
 
-    DEBUG = False
+    def fetchall(self, query, header=False, **kwargs):
+        return self.execute(line=query, local_ns=kwargs)
 
-    def fetchall(self, query, args=(), header=False):
-        c = self.conn.cursor()
-        self.do_execute(c, query, args)
-        if header:
-            yield [d[0] for d in c.description]
-        for row in c.fetchall():
-            yield row
-
-    def do_execute(self, cursor, query, args):
-        if self.DEBUG:
-            print query
-            if args:
-                print args
+    def execute(self, line, cell='', local_ns={}):
+        if self.debug:
+            print line
+            if local_ns:
+                print local_ns
             start = time.time()
-        cursor.execute(query, args)
-        if self.DEBUG:
+        result = super(MemSeeApp, self).execute(line=line, local_ns=local_ns)
+        if self.debug:
             print "({:.2f}s)".format(time.time() - start)
+        return result
 
-    def fetchone(self, query, args=()):
-        c = self.conn.cursor()
-        c.execute(query, args)
-        return c.fetchone()
+    def fetchone(self, query, args={}):
+        result = self.fetchall(query, args)
+        if len(result) >= 1:
+            return result[0]
+        else:
+            return None
 
-    def fetchint(self, query, args=(), default=None):
+    def fetchint(self, query, args={}, default=None):
         one = self.fetchone(query, args)
         if one is None:
             return default
@@ -299,87 +343,25 @@ class MemSeeDb(object):
         return self.fetchint("select sum(size) from obj")
 
     def define_name(self, name, value):
-        self.execute("insert into env (name, value) values (?, ?)", (name, value))
+        self.execute_and_ignore("insert into env (name, value) values (:name, :value)", name=name, value=value)
 
     def all_names(self):
         return self.fetchall("select name, value from env")
 
-
-def need_db(fn):
-    """Decorator for command handlers that need an open database."""
-    @functools.wraps(fn)
-    def _dec(self, *args, **kwargs):
-        if not self.db:
-            print "Need an open database"
-            return
-        return fn(self, *args, **kwargs)
-    return _dec
-
-def handle_errors(fn):
-    """Decorator for command handlers that accept user SQL, to handle errors."""
-    @functools.wraps(fn)
-    def _dec(self, *args, **kwargs):
-        try:
-            return fn(self, *args, **kwargs)
-        except sqlite3.Error as e:
-            print "*** SQL error: {}".format(e)
-        except MemSeeException as e:
-            print "*** {}".format(e)
-    return _dec
-
-
-@magics_class
-class MemSeeApp(Magics):
-
-    prompt = "::> "
-
-    def __init__(self, *args, **kwargs):
-        super(MemSeeApp, self).__init__(*args, **kwargs)
-        self.db = None
-        self.reset()
-
-        self.column_formats = {
-            '#': '<8',
-
-            # obj columns
-            'address': '>16',
-            'type': '<20',
-            'name': '<20',
-            'value': '<60',
-            'size': '>10',
-            'len': '>10',
-
-            # ref columns
-            'parent': '>15',
-            'child': '>15',
-
-            # temp_path columns
-            'path': '<80',
-
-            # ad-hoc columns
-            'count(*)': '>10',
-            'num': '>10',
-            'refs': '>10',
-            'n': '>10',
-        }
-
     def reset(self):
         """Reset the db-derived state of the app."""
-        # results is a list of dicts:
-        #   [{
-        #       'data': [[col, col, col, ...],
-        #                [col, col, col, ...],
-        #                ...
-        #               ],
-        #       'names': ['col1', 'col2', 'col3', ...],
-        #       'id_column': 0,
-        #   }, ...
-        #   ]
+        # results is a list of DataFrames
         self.results = []
 
         # env is a map from names to values, rev_env is values to names.
         self.env = {}
         self.rev_env = {}
+
+    @line_magic
+    def debug(self, line):
+        """Toggle Debug Mode"""
+        self.debug = not self.debug
+        print "DEBUG MODE", "ON" if self.debug else "OFF"
 
     @line_magic
     def create(self, line):
@@ -394,14 +376,14 @@ class MemSeeApp(Magics):
 
         dbfile = words[0]
         self.db = MemSeeDb(dbfile, sys.stdout)
-        self.db.create_schema()
+        self.create_schema()
         self.reset()
-        self.shell.push({'memsee_db': self.db})
+        self.shell.push({'memsee': self})
 
-        print "Database created, available via variable 'memsee_db'"
+        print "Database created, available via variable 'memsee'"
 
     @line_magic
-    def open(self, line, local_ns):
+    def open(self, line):
         """Open a database: open DBFILE"""
         if not line:
             print "Need a db to open"
@@ -411,18 +393,17 @@ class MemSeeApp(Magics):
             self.default(line)
             return
 
-        dbfile = os.path.expanduser(words[0])
-        self.db = MemSeeDb(dbfile, sys.stdout)
+        self.filename = os.path.expanduser(words[0])
+        self.execute("sqlite:///{}".format(self.filename))
         self.reset()
 
         # Load the defined names
-        for name, value in self.db.all_names():
+        for name, value in self.all_names():
             self.env[name] = value
             self.rev_env[value] = name
+        self.shell.push({'memsee': self})
 
-        self.shell.push({'memsee_db': self.db})
-
-        print "Database opened, available via variable 'memsee_db'"
+        print "Database opened, available via variable 'memsee'"
 
     @need_db
     @line_magic
@@ -448,12 +429,12 @@ class MemSeeApp(Magics):
 
         start = time.time()
         with opener(filename) as data:
-            stats = self.db.import_data(data)
+            stats = self.import_data(data)
 
         sys.stdout.write("Marking top objects...")
         sys.stdout.flush()
-        self.db.execute("INSERT INTO obj (address) VALUES (0)")
-        n = self.db.execute("insert into ref (parent, child) select 0, address from obj where address not in (select child from ref);")
+        self.execute_and_ignore("INSERT INTO obj (address) VALUES (0)")
+        n = self.execute_and_ignore("insert into ref (parent, child) select 0, address from obj where address not in (select child from ref);")
         print " {}".format(n)
 
         end = time.time()
@@ -469,9 +450,9 @@ class MemSeeApp(Magics):
     def stats(self, line):
         """Print object and reference counts, and total size."""
         print "{.both} objects, {.both} references, {.both} total bytes".format(
-            Num(self.db.num_objects()),
-            Num(self.db.num_refs()),
-            Num(self.db.total_bytes()),
+            Num(self.num_objects()),
+            Num(self.num_refs()),
+            Num(self.total_bytes()),
         )
 
     @need_db
@@ -483,8 +464,8 @@ class MemSeeApp(Magics):
             return
 
         address = int(line)
-        query = "select address, type, name, value, size, len from obj, ref where obj.address = ref.parent and ref.child = ?"
-        for row in self.db.fetchall(query, (address,)):
+        query = "select address, type, name, value, size, len from obj, ref where obj.address = ref.parent and ref.child = :child"
+        for row in self.fetchall(query, child=address):
             print row
 
     @need_db
@@ -496,8 +477,8 @@ class MemSeeApp(Magics):
             return
 
         address = int(line)
-        query = "select * from obj, ref where obj.address = ?"
-        print self.db.fetchone(query, (address,))
+        query = "select * from obj, ref where obj.address = :addr"
+        print self.fetchone(query, addr=address)
 
     def substitute_symbols(self, sql):
         """Replace tokens in `sql`."""
@@ -524,14 +505,16 @@ class MemSeeApp(Magics):
             rownum = int(m.group(2))
             try:
                 results = self.results[resnum]
-                row = results['data'][rownum]
             except IndexError:
-                raise SubstitutionError("Result reference out of range: {}".format(m.group()))
-            id_column = results['id_column']
-            if id_column is None:
+                raise SubstitutionError("#{} doesn't name a result".format(m.group(1)))
+
+            if 'address' not in results:
                 raise SubstitutionError("Results had no address column: {}".format(m.group()))
 
-            return str(row[id_column])
+            try:
+                return str(results['address'][m.group(0)])
+            except IndexError:
+                raise SubstitutionError("Result reference out of range: {}".format(m.group()))
 
         def replace_column(m):
             """re.sub function for #\d+.\w+ in SQL."""
@@ -542,10 +525,9 @@ class MemSeeApp(Magics):
             except IndexError:
                 raise SubstitutionError("Result reference out of range: {}".format(m.group()))
             try:
-                colnum = results['names'].index(column)
+                return "({})".format(",".join(str(value) for value in results[column]))
             except ValueError:
                 raise SubstitutionError("No such column: {}".format(m.group()))
-            return "({})".format(",".join(str(r[colnum]) for r in results['data']))
 
         def replace_env(m):
             """re.sub function for $\w+ in SQL."""
@@ -565,23 +547,14 @@ class MemSeeApp(Magics):
         if c is None:
             c = u"\N{RING OPERATOR}"
         if isinstance(c, (int, long)):
-            c = str(c)
-            if c in self.rev_env:
-                c = "$" + self.rev_env[c]
+            if str(c) in self.rev_env:
+                c = "$" + self.rev_env[str(c)]
             return c
-        if isinstance(c, (str, unicode)):
-            # Scrub things that will mess with the output.
-            c = c.replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
         return c
 
-    def process_rows(self, data, id_fmt):
+    def process_rows(self, results):
         """Process a row for output."""
-        for i, row in enumerate(data):
-            new_row = [self.fix_cell(c) for c in row]
-            if id_fmt is not None:
-                yield [id_fmt.format(i)] + new_row
-            else:
-                yield new_row
+        return results.applymap(self.fix_cell)
 
     @need_db
     @handle_errors
@@ -595,37 +568,25 @@ class MemSeeApp(Magics):
         Defined names (see the set command) can be used like $name.
         """
         query = self.substitute_symbols("select " + line)
-        self.show_select(query)
+        return self.display_fancy(self.fetchall(query))
 
-    def id_column(self, names):
-        """Return the index of the id column in `names`, or None."""
-        try:
-            return names.index('address')
-        except ValueError:
-            return None
+    def display_fancy(self, results):
+        if isinstance(results, ResultSet):
+            results = results.DataFrame()
 
-    def show_select(self, query, args=(), show_headers=True):
-        results = self.db.fetchall(query, args, header=True)
+        num_results = len(self.results)
+        width = int(math.ceil(math.log10(len(results))))
+        fmt_str = "#{{result}}.{{row:0>{width}}}".format(width=width)
+        index = Series(fmt_str.format(result=num_results, row=row) for row in xrange(len(results)))
 
-        names = list(next(results))
-        data = list(results)
+        results.insert(0, '#', index)
+        results = results.set_index('#')
 
-        id_column = self.id_column(names)
-        headers = ['#'] + names
-        id_fmt = "#{}.{{}}".format(len(self.results))
-        self.results.append({
-            'names': names,
-            'data': data,
-            'id_column': id_column,
-        })
+        results = self.process_rows(results)
 
-        # Show the results.
-        formats = [self.column_formats.get(h, '<10') for h in headers]
-        gw = GridWriter(formats=formats, out=sys.stdout)
-        gw.header(headers if show_headers else None)
-        gw.rows(self.process_rows(data, id_fmt))
+        self.results.append(results)
 
-        return data
+        return qgrid.show_grid(results)
 
     @need_db
     @handle_errors
@@ -636,7 +597,7 @@ class MemSeeApp(Magics):
         See the select command for available shorthands.
         """
         query = self.substitute_symbols("insert " + line)
-        nrows = self.db.execute(query)
+        nrows = self.execute_and_ignore(query)
         print "{} rows inserted".format(nrows)
 
     @need_db
@@ -648,7 +609,7 @@ class MemSeeApp(Magics):
         See the select command for available shorthands.
         """
         query = self.substitute_symbols("delete " + line)
-        nrows = self.db.execute(query)
+        nrows = self.execute_and_ignore(query)
         print "{} rows deleted".format(nrows)
 
     @need_db
@@ -657,39 +618,39 @@ class MemSeeApp(Magics):
     def pin(self, condition):
         """Prevent all objects in obj selected by `condition` from being deleted by `gc`"""
         query = self.substitute_symbols('insert into ref (parent, child) select 0, address from obj where {};'.format(condition))
-        nrows = self.db.execute(query)
+        nrows = self.execute_and_ignore(query)
         print "{} rows pinned".format(nrows)
 
     @need_db
     @line_magic
     def backup(self, _line):
         """Copy the database for safe-keeping.  Only one level."""
-        backup = self.db.filename + '.bak'
+        backup = self.filename + '.bak'
         if os.path.exists(backup):
             print "DB already backed up"
             return
         else:
-            shutil.copyfile(self.db.filename, backup)
+            shutil.copyfile(self.filename, backup)
 
     @need_db
     @line_magic
     def restore(self, _line):
         """Restore a saved-away database."""
-        backup = self.db.filename + '.bak'
+        backup = self.filename + '.bak'
         if not os.path.exists(backup):
             print "No backed up DB"
             return
         else:
-            shutil.copyfile(backup, self.db.filename)
-            self.db = MemSeeDb(self.db.filename, sys.stdout)
+            shutil.copyfile(backup, self.filename)
+            self.open(self.filename)
 
     @need_db
     @line_magic
     def gc(self, line):
         """Delete orphan objects and their references, recursively."""
         self.stats('')
-        self.db.execute("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
-        num_marked = self.db.execute(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
+        self.execute_and_ignore("UPDATE obj SET mark = NULL WHERE mark IS NOT NULL")
+        num_marked = self.execute_and_ignore(self.substitute_symbols("UPDATE obj SET mark = 1 WHERE address IN 0&"))
         print "Marked {} top level objects".format(num_marked)
         self.continue_gc(line)
 
@@ -698,22 +659,23 @@ class MemSeeApp(Magics):
     def continue_gc(self, line):
         """Continue a previously interrupted garbage collection"""
 
-        depth = self.db.fetchint("select max(mark) from obj")
+        depth = self.fetchint("select max(mark) from obj")
 
         while True:
-            num_marked = self.db.execute(
+            num_marked = self.execute_and_ignore(
                 """UPDATE obj
-                      SET mark = ?1 + 1
+                      SET mark = :depth + 1
                     WHERE address IN (
                           SELECT child
                             FROM ref, obj p, obj c
                            WHERE ref.parent = p.address
                              AND ref.child = c.address
-                             AND p.mark = ?1
+                             AND p.mark = :depth
                              AND c.mark is NULL
                           )
                 """,
-                (depth, ))
+                depth=depth
+            )
 
             if num_marked == 0:
                 print "Marking complete"
@@ -722,7 +684,7 @@ class MemSeeApp(Magics):
             print "Marked {} objects at depth {}".format(num_marked, depth)
             depth += 1
 
-        num_deleted = self.db.execute("DELETE FROM obj WHERE mark IS NULL")
+        num_deleted = self.execute_and_ignore("DELETE FROM obj WHERE mark IS NULL")
         print "Deleted {} objects".format(num_deleted)
 
         self.stats('')
@@ -742,9 +704,9 @@ class MemSeeApp(Magics):
         obj or ref table exists.
         """
         words = line.split()
-        gens = self.db.fetchint("select count(*) from gen")
+        gens = self.fetchint("select count(*) from gen")
         if not words:
-            gen = self.db.fetchint("select num from gen where current=1")
+            gen = self.fetchint("select num from gen where current=1")
             print "{} generations, current is {}".format(gens, gen or "-none-")
         else:
             if words[0] == "none":
@@ -760,7 +722,7 @@ class MemSeeApp(Magics):
                     print "** Not a valid generation number: {}".format(gen)
                     return
                 msg = "Using generation {gen} of {gens}"
-            self.db.switch_to_generation(gen)
+            self.switch_to_generation(gen)
             print msg.format(gen=gen, gens=gens)
 
     @need_db
@@ -784,7 +746,7 @@ class MemSeeApp(Magics):
             name, value = words
             self.env[name] = value
             self.rev_env[value] = name
-            self.db.define_name(name, value)
+            self.define_name(name, value)
 
     @handle_errors
     @line_magic
@@ -794,24 +756,6 @@ class MemSeeApp(Magics):
         print line
 
     @line_magic
-    def width(self, line):
-        """Set the widths for columns: WIDTH colname width ..."""
-        words = line.split()
-        if len(words) % 2 != 0:
-            print "Need pairs: colname width ..."
-            return
-        while words:
-            colname, width = words[:2]
-            words = words[2:]
-            try:
-                width = int(width)
-            except ValueError:
-                print "This isn't a width: {!r}".format(width)
-                return
-            align = self.column_formats.get(colname, "<")[0]
-            self.column_formats[colname] = "{}{}".format(align, width)
-
-    @line_magic
     def kids(self, line):
         """Display object descending from an object."""
         words = self.substitute_symbols(line).split()
@@ -819,7 +763,7 @@ class MemSeeApp(Magics):
             print "Need an object address."
             return
         id = int(words[0])
-        self.show_select("select * from obj where address = ?", (id,))
+        self.display_fancy("select * from obj where address = :addr", addr=id)
 
         ids_to_show = set([id])
         ids_shown = set()
@@ -828,7 +772,7 @@ class MemSeeApp(Magics):
             id_list = ",".join(str(i) for i in ids_to_show)
 
             print
-            children = self.show_select("""
+            children = self.display_fancy("""
                 select
                     obj.*,
                     (select count(*) from ref where child = obj.address) refs
@@ -856,10 +800,10 @@ class MemSeeApp(Magics):
         to_cond = words[3]
         reversed = len(words) == 5
 
-        from_address = self.db.fetchone("SELECT cast(address as text) FROM obj WHERE {}".format(from_cond))
-        to_addresses = (row[0] for row in self.db.fetchall("SELECT cast(address as text) FROM obj WHERE {}".format(to_cond)))
+        from_address = self.fetchone("SELECT cast(address as text) FROM obj WHERE {}".format(from_cond))
+        to_addresses = (row[0] for row in self.fetchall("SELECT cast(address as text) FROM obj WHERE {}".format(to_cond)))
 
-        paths = self.db.graph.get_shortest_paths(
+        paths = self.graph.get_shortest_paths(
             v=from_address[0],
             to=to_addresses,
             mode=igraph.IN if reversed else igraph.OUT,
@@ -867,12 +811,15 @@ class MemSeeApp(Magics):
         )
 
         for path in paths:
-            addresses = self.db.graph.vs.select(path)['name']
+            addresses = self.graph.vs.select(path)['name']
 
-            self.db.execute("drop table if exists tmp_path_order")
-            self.db.execute("create temp table tmp_path_order (idx int, address int)")
-            self.db.executemany("insert into tmp_path_order (idx, address) values (?, ?)", enumerate(addresses))
-            self.show_select("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
+            self.execute_and_ignore("drop table if exists tmp_path_order")
+            self.execute_and_ignore("create temp table tmp_path_order (idx int, address int)")
+            self.executemany(
+                "insert into tmp_path_order (idx, address) values (:idx, :addr)",
+                ({"idx": idx, "addr": addr} for idx, addr in enumerate(addresses))
+            )
+            self.display_fancy("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
 
     @need_db
     @handle_errors
@@ -880,15 +827,15 @@ class MemSeeApp(Magics):
     def ancestor_types(self, condition):
         """Display the set of types in each generation of ancestors of the objects selected by `condition`"""
         condition = self.substitute_symbols(condition)
-        self.db.execute('drop table if exists tmp_ancestor_types')
-        self.db.execute("create table tmp_ancestor_types (address int, type text, gen int, refs int, PRIMARY KEY (address, refs))")
+        self.execute_and_ignore('drop table if exists tmp_ancestor_types')
+        self.execute_and_ignore("create table tmp_ancestor_types (address int, type text, gen int, refs int, PRIMARY KEY (address, refs))")
         gen = 0
-        inserted = self.db.execute("insert into tmp_ancestor_types select address, type, 0, 0 from obj where {}".format(condition))
+        inserted = self.execute_and_ignore("insert into tmp_ancestor_types select address, type, 0, 0 from obj where {}".format(condition))
 
         while inserted > 0:
-            inserted = self.db.execute(
+            inserted = self.execute_and_ignore(
                 """INSERT INTO tmp_ancestor_types
-                        SELECT DISTINCT r.parent, parent.type, (?1 + 1), r.child
+                        SELECT DISTINCT r.parent, parent.type, (:gen + 1), r.child
                           FROM ref r LEFT OUTER JOIN tmp_ancestor_types seen
                             ON r.parent = seen.address
                            AND r.child = seen.refs,
@@ -896,15 +843,15 @@ class MemSeeApp(Magics):
                          WHERE r.parent = parent.address
                            AND r.child = child.address
                            AND seen.address is NULL
-                           AND child.gen = ?1
+                           AND child.gen = :gen
                            AND child.type not in ('module', 'Settings')
                 """,
-                (gen, )
+                gen=gen
             )
             print "Found {} new ancestors".format(inserted)
             gen += 1
 
-        self.show_select(
+        self.display_fancy(
             """SELECT gen, type, count(*)
                  FROM (
                      SELECT max(gen) AS gen, type
@@ -922,7 +869,7 @@ class MemSeeApp(Magics):
     @line_magic
     def shell(self, line):
         """Execute a raw sqlite command against the connected database"""
-        self.db.execute(self.substitute_symbols(line))
+        self.execute_and_ignore(self.substitute_symbols(line))
 
 
 class MemSeeException(Exception):
@@ -932,5 +879,7 @@ class SubstitutionError(MemSeeException):
     pass
 
 def load_ipython_extension(ipython):
+    sql_load_ipython_extension(ipython)
     ipython.register_magics(MemSeeApp)
+    qgrid.nbinstall()
 
