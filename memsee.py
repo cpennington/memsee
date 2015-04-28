@@ -556,6 +556,10 @@ class MemSeeApp(SqlMagic):
         if isinstance(results, ResultSet):
             results = results.DataFrame()
 
+        if len(results) == 0:
+            print("No results found.")
+            return
+
         num_results = len(self.results)
         width = int(math.ceil(math.log10(len(results))))
         fmt_str = "#{{result}}.{{row:0>{width}}}".format(width=width)
