@@ -541,7 +541,8 @@ class MemSeeApp(SqlMagic):
     @need_db
     @handle_errors
     @line_magic
-    def select(self, line):
+    @cell_magic
+    def select(self, line, cell=''):
         """Perform a query against the SQLite db.
 
         If the query has an address column, then rows are labelled like #2.5.
@@ -549,7 +550,7 @@ class MemSeeApp(SqlMagic):
 
         Defined names (see the set command) can be used like $name.
         """
-        query = self.substitute_symbols("select " + line)
+        query = self.substitute_symbols("select " + line + " " + cel
         return self.display_fancy(self.fetchall(query))
 
     def display_fancy(self, results):
