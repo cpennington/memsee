@@ -540,8 +540,7 @@ class MemSeeApp(SqlMagic):
 
     @need_db
     @handle_errors
-    @line_magic
-    @cell_magic
+    @line_cell_magic
     def select(self, line, cell=''):
         """Perform a query against the SQLite db.
 
@@ -550,7 +549,7 @@ class MemSeeApp(SqlMagic):
 
         Defined names (see the set command) can be used like $name.
         """
-        query = self.substitute_symbols("select " + line + " " + cel
+        query = self.substitute_symbols("select " + line + " " + cell)
         return self.display_fancy(self.fetchall(query))
 
     def display_fancy(self, results):
