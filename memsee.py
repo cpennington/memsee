@@ -572,7 +572,7 @@ class MemSeeApp(SqlMagic):
 
         self.results.append(results)
 
-        return qgrid.show_grid(results)
+        return qgrid.show_grid(results, remote_js=True)
 
     @need_db
     @handle_errors
