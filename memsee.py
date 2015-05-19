@@ -749,7 +749,12 @@ class MemSeeApp(SqlMagic):
             print("Need an object address.")
             return
         id = int(words[0])
-        self.display_fancy("select * from obj where address = :addr", addr=id)
+        self.display_fancy(
+            self.fetchall(
+                "select * from obj where address = :addr",
+                addr=id
+            )
+        )
 
         ids_to_show = set([id])
         ids_shown = set()
@@ -805,7 +810,13 @@ class MemSeeApp(SqlMagic):
                 "insert into tmp_path_order (idx, address) values (:idx, :addr)",
                 ({"idx": idx, "addr": addr} for idx, addr in enumerate(addresses))
             )
-            self.display_fancy("select obj.* from obj, tmp_path_order where obj.address = tmp_path_order.address order by idx")
+
+            results = self.fetchall(
+                "select obj.* from obj, tmp_path_order where "
+                "obj.address = tmp_path_order.address order by idx"
+            )
+            if len(results):
+                self.display_fancy(results)
 
     @need_db
     @handle_errors
@@ -837,7 +848,7 @@ class MemSeeApp(SqlMagic):
             print("Found {} new ancestors".format(inserted))
             gen += 1
 
-        self.display_fancy(
+        self.display_fancy(self.fetchall(
             """SELECT gen, type, count(*)
                  FROM (
                      SELECT max(gen) AS gen, type
@@ -847,7 +858,7 @@ class MemSeeApp(SqlMagic):
              GROUP BY gen, type
              ORDER BY gen, type
             """
-        )
+        ))
 
 
     @need_db
