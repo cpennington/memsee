@@ -5,7 +5,6 @@ from __future__ import print_function
 from builtins import str
 from builtins import range
 from builtins import object
-from past.utils import old_div
 import functools
 import gzip
 import igraph
